@@ -103,7 +103,7 @@ async function procesarFactura(ticketData, userData, phone) {
         const fechaMs    = new Date(ticketData.fecha).getTime();
         const fechaValida = fechaMs > new Date('2020-01-01').getTime();
         const horas       = (Date.now() - fechaMs) / 3_600_000;
-        if (fechaValida && horas > 23) {
+        if (fechaValida && horas > 30) {
           return {
             ok: false, comercio,
             error: 'ticket_vencido',
