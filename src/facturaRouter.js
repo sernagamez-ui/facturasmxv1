@@ -99,18 +99,7 @@ async function procesarFactura(ticketData, userData, phone) {
       }
       validar(ticketData, ['noTicket', 'monto'], 'OXXO Gas');
 
-      if (ticketData.fecha) {
-        const fechaMs    = new Date(ticketData.fecha).getTime();
-        const fechaValida = fechaMs > new Date('2020-01-01').getTime();
-        const horas       = (Date.now() - fechaMs) / 3_600_000;
-        if (fechaValida && horas > 30) {
-          return {
-            ok: false, comercio,
-            error: 'ticket_vencido',
-            userMessage: `⏰ *Este ticket de OXXO Gas ya venció.*\n\nOXXO Gas solo acepta facturas dentro de las *24 horas* después de la carga.\n\nPara el próximo ticket, mándame la foto el mismo día. 📸`,
-          };
-        }
-      }
+      
 
       const estacionId = ticketData.estacion || ticketData.nombreEstacion || null;
       if (!estacionId) {
