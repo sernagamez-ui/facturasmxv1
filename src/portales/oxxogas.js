@@ -1,54 +1,76 @@
 // src/portales/oxxogas.js
 // Adaptador Playwright para OXXO Gas
-// Usa sesión persistente — login manual una sola vez con save-session.js
+// Login automático — sin sesión persistente
 
 const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
 
 const PORTAL_URL = 'https://facturacion.oxxogas.com';
-const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '../../data');
-const SESSION_FILE = path.join(DATA_DIR, 'oxxogas-session.json');
 
 /**
  * Factura un ticket de OXXO Gas.
- * Llamado desde facturaRouter con esta firma:
- *   facturarOxxoGas({ estacion, noTicket, monto, userData, outputDir })
- *
- * @param {object} params
- *   @param {string} params.estacion
- *   @param {string} params.noTicket  — folio del ticket
- *   @param {number} params.monto
- *   @param {object} params.userData  — { rfc, nombre, cp, regimen, email, ... }
- *   @param {string} params.outputDir — ignorado (OXXO Gas envía por email)
  */
 async function facturarOxxoGas({ estacion, noTicket, monto, userData, esEfectivo = false, outputDir }) {
-  if (!fs.existsSync(SESSION_FILE)) {
-    return { ok: false, error: 'No hay sesión guardada. Corre: node upload-session.js <URL> <SECRET>' };
+  const OXXO_USER = process.env.OXXOGAS_USER;
+  const OXXO_PASS = process.env.OXXOGAS_PASS;
+
+  if (!OXXO_USER || !OXXO_PASS) {
+    return { ok: false, error: 'Faltan credenciales OXXO Gas. Configura OXXOGAS_USER y OXXOGAS_PASS.' };
   }
 
   const browser = await chromium.launch({
     headless: true,
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
   });
-  const context = await browser.newContext({ storageState: SESSION_FILE });
+  const context = await browser.newContext();
   const page = await context.newPage();
 
   try {
-    // 1. VERIFICAR SESIÓN
-    console.log('[OxxoGas] Verificando sesión...');
-    await page.goto(`${PORTAL_URL}/home`, { waitUntil: 'networkidle' });
+    // 1. LOGIN AUTOMÁTICO
+    console.log('[OxxoGas] Iniciando sesión...');
+    await page.goto(`${PORTAL_URL}/login`, { waitUntil: 'networkidle' });
 
+    // Cerrar banner de mantenimiento si aparece
+    try {
+      await page.click('button:has-text("×"), .close, [class*="close"]', { timeout: 3000 });
+      console.log('[OxxoGas] Banner cerrado');
+      await page.waitForTimeout(1000);
+    } catch {
+      console.log('[OxxoGas] Sin banner');
+    }
+
+    // Llenar email y contraseña
+    await page.fill('input[type="email"], input[type="text"][name*="mail"], input[placeholder*="Correo"]', OXXO_USER);
+    await page.fill('input[type="password"]', OXXO_PASS);
+
+    // Click reCAPTCHA
+    try {
+      const recaptchaFrame = page.frameLocator('iframe[src*="recaptcha"]');
+      await recaptchaFrame.locator('.recaptcha-checkbox-border').click({ timeout: 5000 });
+      console.log('[OxxoGas] reCAPTCHA clickeado');
+      await page.waitForTimeout(2000);
+    } catch {
+      console.log('[OxxoGas] Sin reCAPTCHA o ya resuelto');
+    }
+
+    // Click INICIAR SESIÓN
+    await page.click('button:has-text("INICIAR"), a:has-text("INICIAR")');
+    await page.waitForURL('**/home**', { timeout: 15000 }).catch(() => {});
+
+    // Verificar login
     const isLoggedIn = await page.evaluate(async () => {
-      const r = await fetch('/checkuser', { method: 'POST' });
-      const data = await r.json();
-      return data.is_logged === 'TRUE';
+      try {
+        const r = await fetch('/checkuser', { method: 'POST' });
+        const data = await r.json();
+        return data.is_logged === 'TRUE';
+      } catch { return false; }
     });
 
     if (!isLoggedIn) {
-      return { ok: false, error: 'Sesión expirada. Corre: node upload-session.js <URL> <SECRET>' };
+      return { ok: false, error: 'Login OXXO Gas falló. Verifica credenciales.' };
     }
-    console.log('[OxxoGas] Sesión activa ✅');
+    console.log('[OxxoGas] Login exitoso ✅');
 
     // 2. REGISTRAR RFC SI NO EXISTE
     console.log(`[OxxoGas] Verificando RFC ${userData.rfc}...`);
@@ -90,9 +112,7 @@ async function facturarOxxoGas({ estacion, noTicket, monto, userData, esEfectivo
 
     const t = listResp.data[0];
     console.log(`[OxxoGas] Ticket en lista: estacion=${t.estacion_id} folio=${t.folio} monto=${t.monto}`);
-    console.log(`[OxxoGas] Campos ticket:`, Object.keys(t).join(', '));
     console.log(`[OxxoGas] TicketOfUserId:`, t.TicketOfUserId);
-    console.log(`[OxxoGas] Formas de pago disponibles:`, t.tipodepago?.substring(0, 200));
 
     // Si TicketOfUserId está vacío, esperar y reintentar
     let ticketFinal = t;
@@ -140,7 +160,7 @@ async function facturarOxxoGas({ estacion, noTicket, monto, userData, esEfectivo
           body: `tipodepago=${encodeURIComponent(tipodepago)}`
         });
       }, tipodepago);
-      console.log(`[OxxoGas] Forma de pago: ${formaPago.FormaDePagoSeleccionableCve} | TicketOfUserId: ${ticketFinal.TicketOfUserId}`);
+      console.log(`[OxxoGas] Forma de pago: ${formaPago.FormaDePagoSeleccionableCve}`);
     }
 
     // 6. GENERAR CFDI
@@ -157,12 +177,10 @@ async function facturarOxxoGas({ estacion, noTicket, monto, userData, esEfectivo
     if (facturaResp.success) {
       console.log(`[OxxoGas] ✅ ${facturaResp.success}`);
 
-      // Descargar XML y PDF de la factura recién generada
       let xmlPath = null;
       let pdfPath = null;
 
       try {
-        // Obtener el UUID de la factura recién generada
         const facturasResp = await page.evaluate(async () => {
           const r = await fetch('/facturacion/facturas/getList', {
             method: 'POST',
@@ -172,23 +190,16 @@ async function facturarOxxoGas({ estacion, noTicket, monto, userData, esEfectivo
           return r.json();
         });
 
-        // La más reciente es la primera
         const ultimaFactura = facturasResp.data && facturasResp.data[0];
         if (ultimaFactura && ultimaFactura.folio) {
-          // Formato: "59024966 |uuid"
           const partes = ultimaFactura.folio.split('|');
           const uuid = partes[1] ? partes[1].trim() : null;
           const folioNum = partes[0] ? partes[0].trim() : 'factura';
 
           if (uuid) {
             console.log(`[OxxoGas] Descargando UUID: ${uuid}`);
-            const fs   = require('fs');
-            const path = require('path');
-
-            // Crear directorio de salida
             fs.mkdirSync(outputDir, { recursive: true });
 
-            // Descargar XML
             const xmlBuffer = await page.evaluate(async (uuid) => {
               const r = await fetch(`/facturacion/facturas/xml/${uuid}`);
               const buf = await r.arrayBuffer();
@@ -199,7 +210,6 @@ async function facturarOxxoGas({ estacion, noTicket, monto, userData, esEfectivo
             fs.writeFileSync(xmlPath, Buffer.from(xmlBuffer));
             console.log(`[OxxoGas] XML guardado: ${xmlPath}`);
 
-            // Descargar PDF
             const pdfBuffer = await page.evaluate(async (uuid) => {
               const r = await fetch(`/facturacion/facturas/pdf/${uuid}`);
               const buf = await r.arrayBuffer();
@@ -237,33 +247,24 @@ async function facturarOxxoGas({ estacion, noTicket, monto, userData, esEfectivo
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
 
 async function registrarOObtenerRfc(page, userData, usoCfdi) {
-  // Obtener lista de RFCs registrados
   const listResp = await page.evaluate(async () => {
     const r = await fetch('/sistema/fiscales/getList', { method: 'POST' });
     return r.json();
   });
 
   console.log('[OxxoGas] getList respuesta:', JSON.stringify(listResp).substring(0, 500));
-  if (listResp.data && listResp.data.length > 0) {
-    console.log('[OxxoGas] Campos disponibles:', Object.keys(listResp.data[0]).join(', '));
-  }
 
   const rfcUpper = userData.rfc.toUpperCase();
   const existente = (listResp.data || []).find(r => r.rfc === rfcUpper);
 
   if (existente) {
-    // Buscar ID en cualquier campo numérico posible
     const id = existente.id || existente.rfc_id || existente.fiscal_id || existente.cliente_id;
     if (id) {
       console.log(`[OxxoGas] RFC ya existe ID=${id}`);
       return id;
     }
-    // Si existe pero no tiene id numérico, usar el RFC directamente como identificador
-    // El endpoint /facturacion/facturar/getRfc acepta el ID interno
-    // Intentar obtenerlo via getRfc buscando por RFC
     console.log('[OxxoGas] RFC existe pero sin ID numérico — buscando via getRfc...');
     const rfcData = await page.evaluate(async (rfc) => {
-      // Probar con el RFC string directamente
       const r = await fetch('/facturacion/facturar/getRfc', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -272,11 +273,9 @@ async function registrarOObtenerRfc(page, userData, usoCfdi) {
       return r.json();
     }, rfcUpper);
     console.log('[OxxoGas] getRfc por string:', JSON.stringify(rfcData).substring(0, 300));
-    // Si devuelve datos válidos, el RFC string funciona como ID
     if (rfcData && rfcData.rfc_nombre) return rfcUpper;
   }
 
-  // No existe — registrar
   console.log(`[OxxoGas] Registrando nuevo RFC ${userData.rfc}...`);
 
   const coloniaResp = await page.evaluate(async (cp) => {
@@ -286,17 +285,15 @@ async function registrarOObtenerRfc(page, userData, usoCfdi) {
 
   if (!coloniaResp.loc_id) throw new Error(`CP ${userData.cp} no encontrado en portal OXXO Gas`);
 
-  console.log('[OxxoGas] CP data:', JSON.stringify(coloniaResp));
-
   const body = new URLSearchParams({
     isCFDI4:        'true',
     regimen:        '1',
     regimen_fiscal: String(userData.regimen),
     usocfdi:        usoCfdi,
     razonsocial:    userData.nombre,
-    estado:         String(coloniaResp.est_id),    // est_id = 19
-    municipio:      String(coloniaResp.mun_clave), // mun_clave = 19 (NO mun_id=966)
-    colonia:        String(coloniaResp.loc_id),    // loc_id = 84978
+    estado:         String(coloniaResp.est_id),
+    municipio:      String(coloniaResp.mun_clave),
+    colonia:        String(coloniaResp.loc_id),
     cp:             String(userData.cp),
     calle:          userData.calle || 'SIN CALLE',
     noext:          userData.noext || 'S/N',
@@ -304,8 +301,6 @@ async function registrarOObtenerRfc(page, userData, usoCfdi) {
     email:          userData.email,
     rfc:            userData.rfc.toUpperCase()
   }).toString();
-
-  console.log('[OxxoGas] agregar body:', body);
 
   const agregarResp = await page.evaluate(async (body) => {
     const r = await fetch('/sistema/fiscales/agregar', {
@@ -316,26 +311,20 @@ async function registrarOObtenerRfc(page, userData, usoCfdi) {
     return r.json();
   }, body);
 
-  console.log('[OxxoGas] agregar respuesta:', JSON.stringify(agregarResp));
-
-  // {"msg":null} significa RFC ya existe — continuar
   if (!agregarResp.success && agregarResp.msg !== null) {
     throw new Error(`Error registrando RFC: ${JSON.stringify(agregarResp)}`);
   }
 
-  // Obtener ID recién asignado
   const listResp2 = await page.evaluate(async () => {
     const r = await fetch('/sistema/fiscales/getList', { method: 'POST' });
     return r.json();
   });
 
-  console.log('[OxxoGas] getList post-agregar:', JSON.stringify(listResp2).substring(0, 500));
-
   const nuevo = (listResp2.data || []).find(r => r.rfc === rfcUpper);
   if (!nuevo) throw new Error(`RFC ${userData.rfc} no aparece en la lista tras registrarlo`);
 
   const nuevoId = nuevo.id || nuevo.rfc_id || nuevo.fiscal_id || nuevo.cliente_id || rfcUpper;
-  console.log(`[OxxoGas] RFC listo ID=${nuevoId}, campos: ${Object.keys(nuevo).join(', ')}`);
+  console.log(`[OxxoGas] RFC listo ID=${nuevoId}`);
   return nuevoId;
 }
 
