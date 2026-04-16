@@ -9,6 +9,7 @@ const { facturarPetro7 }       = require('./portales/petro7');
 const { facturarOxxoGas }      = require('./portales/oxxogas');
 const { generarFacturaHEB }    = require('./portales/heb');
 const { facturarAlsea }        = require('./portales/alsea');
+const { facturar7Eleven }     = require('./portales/7eleven');
 const { mensajeDeducibilidad, calcularDeducibilidadGasolina } = require('./deducibilidad');
 const { ALSEA_OPERADOR_MAP, ALSEA_BRANDS } = require('./ticketReader');
 const db = require('./db');
@@ -50,7 +51,6 @@ async function procesarFactura(ticketData, userData, phone) {
         outputDir,
       });
 
-      // Mapear errores específicos de Alsea a mensajes de usuario
       if (!resultado.ok) {
         const errorMap = {
           ya_facturado:    '📋 Este ticket ya fue facturado anteriormente.',
@@ -58,7 +58,6 @@ async function procesarFactura(ticketData, userData, phone) {
           rfc_invalido:    '⚠️ El RFC fue rechazado por el SAT. Verifica tus datos fiscales.',
           datos_fiscales:  '⚠️ Los datos fiscales fueron rechazados. Verifica tu nombre, CP y régimen fiscal.',
         };
-        // ticket_invalido → pedir datos manuales (mismo patrón que Petro 7 esperandoEstacion)
         if (resultado.error === 'ticket_invalido') {
           resultado.esperandoDatosAlsea = true;
           resultado.ticketData = ticketData;
@@ -99,7 +98,18 @@ async function procesarFactura(ticketData, userData, phone) {
       }
       validar(ticketData, ['noTicket', 'monto'], 'OXXO Gas');
 
-      
+      if (ticketData.fecha) {
+        const fechaMs    = new Date(ticketData.fecha).getTime();
+        const fechaValida = fechaMs > new Date('2020-01-01').getTime();
+        const horas       = (Date.now() - fechaMs) / 3_600_000;
+        if (fechaValida && horas > 23) {
+          return {
+            ok: false, comercio,
+            error: 'ticket_vencido',
+            userMessage: `⏰ *Este ticket de OXXO Gas ya venció.*\n\nOXXO Gas solo acepta facturas dentro de las *24 horas* después de la carga.\n\nPara el próximo ticket, mándame la foto el mismo día. 📸`,
+          };
+        }
+      }
 
       const estacionId = ticketData.estacion || ticketData.nombreEstacion || null;
       if (!estacionId) {
@@ -143,6 +153,46 @@ async function procesarFactura(ticketData, userData, phone) {
         envioPorCorreo: false,
       };
 
+    // ── 7-Eleven ───────────────────────────────────────────────────────
+    } else if (comercio === '7eleven' || comercio === 'sieveEleven') {
+      validar(ticketData, ['noTicket'], '7-Eleven');
+
+      const r = await facturar7Eleven(
+        { noTicket: ticketData.noTicket },
+        {
+          rfc:     userData.rfc,
+          nombre:  userData.nombre,
+          cp:      userData.cp,
+          regimen: userData.regimen,
+          email:   userData.email,
+          usoCFDI: comercioUsoCFDI(comercio, userData),
+        }
+      );
+
+      if (!r.success) {
+        resultado = { ok: false, error: r.error, userMessage: armarMensaje7ElevenError(r.error) };
+      } else {
+        const fs = require('fs');
+        fs.mkdirSync(outputDir, { recursive: true });
+
+        const pdfPath = path.join(outputDir, `7eleven_${r.uuid}.pdf`);
+        const xmlPath = path.join(outputDir, `7eleven_${r.uuid}.xml`);
+        fs.writeFileSync(pdfPath, Buffer.from(r.b64Pdf, 'base64'));
+        fs.writeFileSync(xmlPath, r.xml);
+
+        resultado = {
+          ok: true,
+          pdfPath,
+          xmlPath,
+          uuid: r.uuid,
+          folio: r.folio,
+          serie: r.serie,
+          total: r.total,
+        };
+
+        if (!ticketData.total && r.total) ticketData.total = r.total;
+      }
+
     // ── No soportado ────────────────────────────────────────────────────
     } else {
       return {
@@ -182,7 +232,7 @@ function validar(data, campos, nombre) {
 function armarMensajeExito(resultado, ticketData, userData, comercio) {
   const nombres = {
     petro7: 'Petro 7', oxxogas: 'OXXO Gas', heb: 'HEB',
-    // Alsea brands
+    '7eleven': '7-Eleven', sieveEleven: '7-Eleven',
     starbucks: 'Starbucks', dominos: "Domino's", burgerking: 'Burger King',
     chilis: "Chili's", cpk: 'California Pizza Kitchen', pfchangs: "P.F. Chang's",
     italiannis: "Italianni's", vips: 'VIPS', popeyes: 'Popeyes',
@@ -215,6 +265,7 @@ function armarMensajeExito(resultado, ticketData, userData, comercio) {
 function armarMensajeError(error, comercio) {
   const nombres = {
     petro7: 'Petro 7', oxxogas: 'OXXO Gas', heb: 'HEB',
+    '7eleven': '7-Eleven', sieveEleven: '7-Eleven',
     starbucks: 'Starbucks', dominos: "Domino's", burgerking: 'Burger King',
     chilis: "Chili's", cpk: 'California Pizza Kitchen', pfchangs: "P.F. Chang's",
     italiannis: "Italianni's", vips: 'VIPS', popeyes: 'Popeyes',
@@ -235,6 +286,23 @@ function armarMensajeError(error, comercio) {
     msg += `Error: ${error}\n\nIntenta de nuevo o escribe *ayuda*.`;
   }
   return msg;
+}
+
+function comercioUsoCFDI(comercio, userData) {
+  return userData.usoCFDI || 'G03';
+}
+
+function armarMensaje7ElevenError(error) {
+  if (!error) return '⚠️ Error desconocido al facturar en 7-Eleven.';
+  if (error.includes('ya fue facturado'))   return '📋 Este ticket de 7-Eleven ya fue facturado anteriormente.';
+  if (error.includes('no encontrado'))      return '🔍 Ticket no encontrado. Verifica que el número sea correcto.';
+  if (error.includes('vencido') || error.includes('mes'))
+    return '📅 Este ticket ya venció. 7-Eleven permite facturar dentro del mes + los primeros 5 días del siguiente.';
+  if (error.includes('captcha') || error.includes('Captcha'))
+    return '🔄 Problema con el captcha del portal. Intenta de nuevo en un momento.';
+  if (error.includes('no disponible'))
+    return '🔧 El portal de 7-Eleven está temporalmente fuera de servicio. Intenta más tarde.';
+  return `⚠️ No se pudo facturar en 7-Eleven: ${error}`;
 }
 
 module.exports = { procesarFactura };
