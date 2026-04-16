@@ -427,12 +427,6 @@ if (process.env.WEBHOOK_URL) {
     console.log(`[Cotas] Webhook en puerto ${PORT} — ${new Date().toISOString()}`);
   });
 } else {
-  bot.launch();
-  console.log('[Cotas] Modo polling');
-  process.once('SIGINT',  () => bot.stop('SIGINT'));
-  process.once('SIGTERM', () => bot.stop('SIGTERM'));
-}
-
 // TEMPORAL — diagnóstico de conectividad a portales
 bot.command('testpetro7', async (ctx) => {
   await ctx.reply('⏳ Probando conexión a Petro 7...');
@@ -455,3 +449,9 @@ bot.command('testpetro7', async (ctx) => {
     await ctx.reply('❌ Status: ' + status + '\nServer: ' + server + '\nCloudflare: ' + cf + '\nError: ' + e.message);
   }
 });
+
+  bot.launch();
+  console.log('[Cotas] Modo polling');
+  process.once('SIGINT',  () => bot.stop('SIGINT'));
+  process.once('SIGTERM', () => bot.stop('SIGTERM'));
+}
