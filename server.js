@@ -417,16 +417,21 @@ cron.schedule('0 9 1 * *', async () => {
 // ── Arrancar ──────────────────────────────────────────────────────────────────
 
 if (process.env.WEBHOOK_URL) {
+  // Modo webhook (Railway / producción)
   app.use(express.json());
   app.use(bot.webhookCallback('/webhook'));
   const PORT = process.env.PORT || 3000;
   app.listen(PORT, async () => {
     await bot.telegram.setWebhook(`${process.env.WEBHOOK_URL}/webhook`);
-    console.log(`[Cotas] Webhook en puerto ${PORT} — ${new Date().toISOString()}`);
+    console.log(`[Cotas] Modo webhook en puerto ${PORT} — ${new Date().toISOString()}`);
   });
-
-  bot.launch();
-  console.log('[Cotas] Modo polling');
-  process.once('SIGINT',  () => bot.stop('SIGINT'));
-  process.once('SIGTERM', () => bot.stop('SIGTERM'));
+} else {
+  // Modo polling (desarrollo local)
+  bot.telegram.deleteWebhook({ drop_pending_updates: true }).then(() => {
+    bot.launch();
+    console.log('[Cotas] Modo polling');
+  });
 }
+
+process.once('SIGINT',  () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));
