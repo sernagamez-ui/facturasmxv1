@@ -238,6 +238,7 @@ async function detectarComercio(base64, mimeType) {
 petro7
 oxxogas
 oxxo
+7eleven
 heb
 starbucks
 dominos
@@ -256,6 +257,7 @@ general
 REGLAS:
 - Si ves "PETROMAX", "Petro 7", "Petro Seven", "petro7.mx" o "petro-7" -> responde: petro7
 - Si ves "OXXO Gas", "oxxogas", "oxxogasteescucha" -> responde: oxxogas
+- Si ves "7-ELEVEN", "7 ELEVEN", "7 Eleven", "e7-eleven", "SEM980701STA" (RFC de 7-Eleven) -> responde: 7eleven
 - Si ves "OXXO" (tienda de conveniencia, no gasolinera) -> responde: oxxo
 - Si ves "H-E-B", "H·E·B", "HEB", "heb.com.mx" o "SUPERMERCADOS INTERN. HEB" -> responde: heb
 - Si ves "STARBUCKS", "Starbucks Coffee", sirena verde -> responde: starbucks
@@ -278,7 +280,7 @@ REGLAS:
 
   const val = response.content[0].text.trim().toLowerCase();
   const valid = [
-    'petro7', 'oxxogas', 'oxxo', 'heb',
+    'petro7', 'oxxogas', 'oxxo', '7eleven', 'heb',
     ...ALSEA_BRANDS,
     'general',
   ];
@@ -292,6 +294,7 @@ function elegirPrompt(comercio) {
     case 'petro7':  return promptPetro7();
     case 'oxxogas': return promptOxxoGas();
     case 'heb':     return promptHEB();
+    case '7eleven': return prompt7Eleven();
     default:        return promptGeneral();
   }
 }
@@ -458,6 +461,63 @@ REGLAS CRÍTICAS:
 - noTicket: los dígitos al INICIO de la última línea (antes de la fecha MM-DD-YY). Cópialos exactamente con sus ceros.
 - fecha: formato de entrada MM-DD-YY → formato de salida YYYY-MM-DD. El año actual es ${anioActual}. YY → 20YY (ej: si ves "26" el año completo es ${anioActual}, si ves "25" es ${anioActual - 1}). Ejemplo: "04-11-26" → "${anioActual}-04-11".
 - total: el campo "***Venta Total" es el precio real de la compra. El campo EFECTIVO es lo que pagó el cliente (puede ser más). Usa SIEMPRE ***Venta Total.
+
+Responde SOLO con el JSON, sin texto adicional.`;
+}
+
+// ─────────────────────────────────────────────
+// PROMPT — 7-Eleven
+// ─────────────────────────────────────────────
+
+function prompt7Eleven() {
+  return `Analiza este ticket de 7-Eleven México y extrae los datos en formato JSON.
+
+ESTRUCTURA DEL TICKET 7-ELEVEN:
+- Encabezado: "7 ELEVEN MEXICO SA DE CV" con dirección corporativa
+- RFC del emisor: SEM980701STA
+- Datos de tienda: "TIENDA XXXX [NOMBRE]" con dirección
+- Fecha/hora de compra
+- Tabla de productos con precios
+- Totales: Subtotal, IVA, Total
+- Código de barras grande cerca del pie
+- DEBAJO del código de barras: SECUENCIA DE 30-40 DÍGITOS (ESTE ES EL noTicket)
+
+CAMPOS A EXTRAER:
+{
+  "encontrado": true,
+  "comercio": "7eleven",
+  "noTicket": "secuencia COMPLETA de 30-40 dígitos impresa justo debajo del código de barras",
+  "tienda": "número de 4 dígitos de la tienda (ej: 1460) o null",
+  "fecha": "fecha de compra en formato YYYY-MM-DD",
+  "total": monto total como número decimal o null,
+  "metodoPago": "tarjeta" o "efectivo" o null
+}
+
+REGLAS CRÍTICAS:
+
+1. noTicket: es UNA SOLA secuencia larga de dígitos (NO espacios, NO guiones) impresa DEBAJO del código de barras.
+   Ejemplo real: 14601404202621000072843500332981657 (35 dígitos)
+   Estructura interna: [tienda 4d][fecha DDMMYYYY][resto con cajero/transacción/secuencia]
+   
+   - COPIA TODOS LOS DÍGITOS en orden, sin omitir ninguno
+   - NO uses el número de tienda solo (eso es otro campo)
+   - NO uses el número que aparece en "TARJ. BANCARIA" o "Cuenta No."
+   - NO uses el número de "Autorización" ni "Afiliación"
+   - El noTicket es específicamente la línea LARGA de dígitos bajo el código de barras
+
+2. REGLAS ÓPTICAS para dígitos (lee cuidadosamente):
+   - 0 (cero) vs O (letra): en esta secuencia todo son DÍGITOS, nunca letras
+   - 1 vs 7: el 1 es vertical recto, el 7 tiene trazo horizontal superior
+   - 6 vs 8: el 6 tiene curva abierta arriba, el 8 es cerrado en ambos lados
+   - 3 vs 5: el 3 tiene dos curvas a la derecha, el 5 tiene ángulo recto arriba
+   - 9 vs 4: el 9 es curva cerrada con cola, el 4 es anguloso
+
+3. VERIFICACIÓN: después de leer el noTicket, cuenta los dígitos. Debe tener entre 30 y 40 dígitos.
+   Si te salen menos, probablemente omitiste algunos — relee.
+
+4. tienda: son los primeros 4 dígitos del noTicket. También aparece explícitamente como "TIENDA XXXX".
+
+5. fecha: formato de entrada puede ser DD/MM/YYYY. Convierte a YYYY-MM-DD.
 
 Responde SOLO con el JSON, sin texto adicional.`;
 }

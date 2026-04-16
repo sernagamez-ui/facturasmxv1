@@ -51,6 +51,7 @@ async function procesarFactura(ticketData, userData, phone) {
         outputDir,
       });
 
+      // Mapear errores específicos de Alsea a mensajes de usuario
       if (!resultado.ok) {
         const errorMap = {
           ya_facturado:    '📋 Este ticket ya fue facturado anteriormente.',
@@ -58,6 +59,7 @@ async function procesarFactura(ticketData, userData, phone) {
           rfc_invalido:    '⚠️ El RFC fue rechazado por el SAT. Verifica tus datos fiscales.',
           datos_fiscales:  '⚠️ Los datos fiscales fueron rechazados. Verifica tu nombre, CP y régimen fiscal.',
         };
+        // ticket_invalido → pedir datos manuales (mismo patrón que Petro 7 esperandoEstacion)
         if (resultado.error === 'ticket_invalido') {
           resultado.esperandoDatosAlsea = true;
           resultado.ticketData = ticketData;
@@ -172,6 +174,7 @@ async function procesarFactura(ticketData, userData, phone) {
       if (!r.success) {
         resultado = { ok: false, error: r.error, userMessage: armarMensaje7ElevenError(r.error) };
       } else {
+        // Escribir PDF y XML a archivos
         const fs = require('fs');
         fs.mkdirSync(outputDir, { recursive: true });
 
@@ -190,6 +193,7 @@ async function procesarFactura(ticketData, userData, phone) {
           total: r.total,
         };
 
+        // Inyectar total al ticketData para el mensaje de éxito
         if (!ticketData.total && r.total) ticketData.total = r.total;
       }
 
@@ -233,6 +237,7 @@ function armarMensajeExito(resultado, ticketData, userData, comercio) {
   const nombres = {
     petro7: 'Petro 7', oxxogas: 'OXXO Gas', heb: 'HEB',
     '7eleven': '7-Eleven', sieveEleven: '7-Eleven',
+    // Alsea brands
     starbucks: 'Starbucks', dominos: "Domino's", burgerking: 'Burger King',
     chilis: "Chili's", cpk: 'California Pizza Kitchen', pfchangs: "P.F. Chang's",
     italiannis: "Italianni's", vips: 'VIPS', popeyes: 'Popeyes',
@@ -289,6 +294,7 @@ function armarMensajeError(error, comercio) {
 }
 
 function comercioUsoCFDI(comercio, userData) {
+  // 7-Eleven: G03 (gastos en general) por defecto, G01 si es para reventa
   return userData.usoCFDI || 'G03';
 }
 
