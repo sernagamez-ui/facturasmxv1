@@ -36,7 +36,14 @@ function crearSesion() {
     timeout: 15000,
     headers: {
       'Accept': 'application/json, text/plain, */*',
+      'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
+      'Accept-Encoding': 'gzip, deflate, br',
+      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
       'Referer': `${BASE}/facturacion/KPortalExterno/`,
+      'Origin': BASE,
+      'Sec-Fetch-Dest': 'empty',
+      'Sec-Fetch-Mode': 'cors',
+      'Sec-Fetch-Site': 'same-origin',
     },
   });
 
@@ -248,9 +255,14 @@ async function facturar7Eleven(ticket, fiscal) {
     };
 
   } catch (err) {
-    console.error(`[7-Eleven] ❌ ${err.message}`);
+    const status = err.response?.status;
+    const urlFail = err.config?.url;
+    console.error(`[7-Eleven] ❌ ${err.message} (status=${status}, url=${urlFail})`);
 
-    if (err.response?.status === 502 || err.response?.status === 503) {
+    if (status === 403) {
+      return { success: false, error: 'Portal de 7-Eleven bloqueó la petición (403). Intenta más tarde.' };
+    }
+    if (status === 502 || status === 503) {
       return { success: false, error: 'Portal de 7-Eleven temporalmente no disponible.' };
     }
 
