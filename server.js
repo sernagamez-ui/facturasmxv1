@@ -113,9 +113,6 @@ bot.action(/^usocfdi_(.+)$/, async (ctx) => {
   });
 });
 
-// ── Texto ─────────────────────────────────────────────────────────────────────
-
-} else {
 // TEMPORAL — diagnóstico de conectividad a portales
 bot.command('testpetro7', async (ctx) => {
   await ctx.reply('⏳ Probando conexión a Petro 7...');
