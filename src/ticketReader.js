@@ -64,11 +64,69 @@ async function leerTicket(imageBuffer, mimeType = 'image/jpeg') {
 
   try {
     const data = JSON.parse(clean);
-    return { ...data, comercio };
+    const normalized = { ...data, comercio };
+
+    // 7-Eleven: fallback automático si el noTicket no cumple 30-40 dígitos.
+    // Evita pedir captura manual cuando OCR/vision recorta la secuencia.
+    if (comercio === '7eleven') {
+      return await completarNoTicket7Eleven(normalized, base64, mimeType);
+    }
+
+    return normalized;
   } catch {
     console.error('[ticketReader] JSON inválido:', clean.substring(0, 300));
     return { encontrado: false, comercio, error: 'No se pudo leer el ticket' };
   }
+}
+
+async function completarNoTicket7Eleven(ticketData, base64, mimeType) {
+  const current = String(ticketData?.noTicket || '').replace(/\D/g, '');
+  const candidates = [];
+  if (/^\d{30,40}$/.test(current)) candidates.push(current);
+
+  try {
+    const response = await client.messages.create({
+      model: MODEL_SONNET,
+      max_tokens: 220,
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'image', source: { type: 'base64', media_type: mimeType, data: base64 } },
+          {
+            type: 'text',
+            text:
+              'Extrae el número largo que aparece debajo del código de barras del ticket 7-Eleven. ' +
+              'Responde SOLO JSON con esta forma exacta: {"noTicket":"<solo_digitos>","candidatos":["<solo_digitos>"]}. ' +
+              'Incluye hasta 3 candidatos ordenados por confianza. Cada candidato debe tener 30 a 40 dígitos, sin espacios ni guiones.',
+          },
+        ],
+      }],
+    });
+
+    const raw = response.content[0].text.trim().replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(raw);
+    const noTicket = String(parsed?.noTicket || '').replace(/\D/g, '');
+    if (/^\d{30,40}$/.test(noTicket)) candidates.push(noTicket);
+    if (Array.isArray(parsed?.candidatos)) {
+      parsed.candidatos.forEach((c) => {
+        const val = String(c || '').replace(/\D/g, '');
+        if (/^\d{30,40}$/.test(val)) candidates.push(val);
+      });
+    }
+  } catch (err) {
+    console.warn('[ticketReader] Fallback 7-Eleven noTicket falló:', err.message);
+  }
+
+  const uniqueCandidates = [...new Set(candidates)];
+  if (uniqueCandidates.length > 0) {
+    return {
+      ...ticketData,
+      noTicket: uniqueCandidates[0],
+      noTicketCandidates: uniqueCandidates,
+    };
+  }
+
+  return { ...ticketData, noTicketCandidates: [] };
 }
 
 // ─────────────────────────────────────────────

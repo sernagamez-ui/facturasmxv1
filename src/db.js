@@ -13,6 +13,18 @@ const db = new Database(path.join(DATA_DIR, 'cotas.db'));
 db.pragma('journal_mode = WAL');
 db.pragma('busy_timeout = 5000');
 
+function normalizeId(id) {
+  const raw = String(id ?? '').trim();
+  const digits = raw.replace(/\D/g, '');
+  // WhatsApp puede entregar 521XXXXXXXXXX mientras Meta usa 52XXXXXXXXXX.
+  if (digits.startsWith('521') && digits.length === 13) return `52${digits.slice(3)}`;
+  return digits || raw;
+}
+
+function legacyId(id) {
+  return String(id ?? '').trim();
+}
+
 db.exec(`
   CREATE TABLE IF NOT EXISTS users    (id TEXT PRIMARY KEY, data TEXT NOT NULL DEFAULT '{}');
   CREATE TABLE IF NOT EXISTS states   (id TEXT PRIMARY KEY, data TEXT NOT NULL DEFAULT '{}');
@@ -35,21 +47,57 @@ const stmts = {
   setEst:       db.prepare('INSERT OR REPLACE INTO estaciones (nombre, estacion_id) VALUES (?, ?)'),
 };
 
-function getUser(id)       { const r = stmts.getUser.get(String(id)); return r ? JSON.parse(r.data) : null; }
-function setUser(id, data) { stmts.setUser.run(String(id), JSON.stringify(data)); }
+function getUser(id) {
+  const key = normalizeId(id);
+  const r = stmts.getUser.get(key) || stmts.getUser.get(legacyId(id));
+  return r ? JSON.parse(r.data) : null;
+}
+
+function setUser(id, data) {
+  const key = normalizeId(id);
+  const current = getUser(key) || {};
+  const next = { ...current, ...data };
+  stmts.setUser.run(key, JSON.stringify(next));
+}
+
 function isOnboarded(id)   { const u = getUser(id); return !!(u && u.rfc && u.nombre && u.cp && u.regimen && u.email); }
-function getState(id)      { const r = stmts.getState.get(String(id)); return r ? JSON.parse(r.data) : null; }
-function setState(id, s)   { s === null ? stmts.delState.run(String(id)) : stmts.setState.run(String(id), JSON.stringify(s)); }
+
+function getState(id) {
+  const key = normalizeId(id);
+  const r = stmts.getState.get(key) || stmts.getState.get(legacyId(id));
+  return r ? JSON.parse(r.data) : null;
+}
+
+function setState(id, s) {
+  const key = normalizeId(id);
+  s === null ? stmts.delState.run(key) : stmts.setState.run(key, JSON.stringify(s));
+}
 
 function guardarFactura(id, fac) {
   const data = { ...fac, guardadoEn: new Date().toISOString() };
-  stmts.addFactura.run(String(id), JSON.stringify(data), data.guardadoEn);
+  stmts.addFactura.run(normalizeId(id), JSON.stringify(data), data.guardadoEn);
 }
-function getFacturasMes(id) {
-  const now = new Date();
-  const s = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
-  const e = new Date(now.getFullYear(), now.getMonth() + 1, 1).toISOString();
-  return stmts.getFactMes.all(String(id), s, e).map(r => JSON.parse(r.data));
+function getFacturasMes(id, monthKey) {
+  let s;
+  let e;
+  if (typeof monthKey === 'string' && /^\d{4}-\d{2}$/.test(monthKey)) {
+    const [year, month] = monthKey.split('-').map(Number);
+    s = new Date(year, month - 1, 1).toISOString();
+    e = new Date(year, month, 1).toISOString();
+  } else {
+    const now = new Date();
+    s = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
+    e = new Date(now.getFullYear(), now.getMonth() + 1, 1).toISOString();
+  }
+  const key = normalizeId(id);
+  const legacy = legacyId(id);
+  const rows = key === legacy
+    ? stmts.getFactMes.all(key, s, e)
+    : [
+        ...stmts.getFactMes.all(key, s, e),
+        ...stmts.getFactMes.all(legacy, s, e),
+      ];
+  return rows.map(r => JSON.parse(r.data));
 }
 function getFacturasMesAnteriorTodos() {
   const now = new Date();

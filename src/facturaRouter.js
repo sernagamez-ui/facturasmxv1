@@ -158,18 +158,34 @@ async function procesarFactura(ticketData, userData, phone) {
     // ── 7-Eleven ───────────────────────────────────────────────────────
     } else if (comercio === '7eleven' || comercio === 'sieveEleven') {
       validar(ticketData, ['noTicket'], '7-Eleven');
+      const rawCandidates = [ticketData.noTicket, ...(ticketData.noTicketCandidates || [])];
+      const candidates = [...new Set(rawCandidates
+        .map((x) => String(x || '').replace(/\D/g, ''))
+        .filter((x) => /^\d{30,40}$/.test(x)))];
 
-      const r = await facturar7Eleven(
-        { noTicket: ticketData.noTicket },
-        {
-          rfc:     userData.rfc,
-          nombre:  userData.nombre,
-          cp:      userData.cp,
-          regimen: userData.regimen,
-          email:   userData.email,
-          usoCFDI: comercioUsoCFDI(comercio, userData),
+      let r = null;
+      for (const noTicket of candidates) {
+        const intento = await facturar7Eleven(
+          { noTicket },
+          {
+            rfc:     userData.rfc,
+            nombre:  userData.nombre,
+            cp:      userData.cp,
+            regimen: userData.regimen,
+            email:   userData.email,
+            usoCFDI: comercioUsoCFDI(comercio, userData),
+          }
+        );
+        if (intento.success) {
+          ticketData.noTicket = noTicket;
+          r = intento;
+          break;
         }
-      );
+        r = intento;
+        if (intento.code !== 'TICKET_INVALID' && intento.code !== 'INVALID_INPUT') {
+          break;
+        }
+      }
 
       if (!r.success) {
         resultado = { ok: false, error: r.error, userMessage: armarMensaje7ElevenError(r.error) };

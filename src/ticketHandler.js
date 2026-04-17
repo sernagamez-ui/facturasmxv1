@@ -170,6 +170,7 @@ async function handleRetryAlsea(userId, texto, userData) {
   };
 }
 
+
 // ── Guardar en historial ──────────────────────────────────────────────────────
 
 function _guardarEnHistorial(userId, ticketData, resultado, userData) {

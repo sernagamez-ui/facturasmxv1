@@ -419,6 +419,7 @@ cron.schedule('0 9 1 * *', async () => {
 const PORT = Number(process.env.PORT || 3000);
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
 const IS_RAILWAY = Boolean(process.env.RAILWAY_PROJECT_ID || process.env.RAILWAY_ENVIRONMENT_ID);
+let isPollingActive = false;
 
 // Health endpoint para Railway
 app.get('/health', (_req, res) => {
@@ -452,6 +453,7 @@ async function startBot() {
   // Local/dev: polling
   await bot.telegram.deleteWebhook({ drop_pending_updates: true });
   await bot.launch();
+  isPollingActive = true;
   console.log('[Cotas] Modo polling');
 }
 
@@ -460,5 +462,14 @@ startBot().catch((err) => {
   process.exit(1);
 });
 
-process.once('SIGINT',  () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+function gracefulStop(signal) {
+  if (!isPollingActive) return;
+  try {
+    bot.stop(signal);
+  } catch (err) {
+    console.warn(`[Cotas] Error al detener bot (${signal}): ${err.message}`);
+  }
+}
+
+process.once('SIGINT',  () => gracefulStop('SIGINT'));
+process.once('SIGTERM', () => gracefulStop('SIGTERM'));

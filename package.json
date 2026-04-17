@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.24.0",
+    "adm-zip": "^0.5.17",
     "axios": "^1.6.0",
     "better-sqlite3": "^11.10.0",
     "dotenv": "^16.4.5",
