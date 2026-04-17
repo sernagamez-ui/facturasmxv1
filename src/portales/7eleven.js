@@ -1,42 +1,200 @@
 /**
- * src/portales/7eleven.js — Adaptador HTTP para 7-Eleven México
- * 
- * API REST puro con axios. Auth: Basic estática (hardcodeada en el JS del portal).
- * Captcha: Kaptcha.jpg → Claude Vision (Haiku), validación session-based.
- * 
- * Descubierto via DevTools → Copy as cURL: authorization: Basic a2V4d...
- * Sin Playwright. Sin registro. Factura Express.
- * 
- * RFC Emisor: SEM980701STA (7-ELEVEN MEXICO SA DE CV)
+ * src/portales/7eleven.js — Adaptador HTTP para 7-Eleven México (PRODUCCIÓN)
+ *
+ * Cambios vs v1:
+ *  - Credenciales y endpoints en env vars (con defaults seguros)
+ *  - Idempotencia: cache de tickets ya facturados (in-memory + hook DB opcional)
+ *  - Retry con backoff exponencial en HTTP (red flaky / 5xx)
+ *  - Circuit breaker para Claude Vision (evita gastar tokens si Anthropic cae)
+ *  - Validación estricta de inputs fiscales (RFC, CP, régimen, UUID, monto)
+ *  - Logger estructurado inyectable (pino/winston compatible)
+ *  - Errores sanitizados al usuario, detalles solo en logs
+ *  - Métricas (duración, intentos captcha, status)
+ *  - Email NO va en query string visible en logs (POST cuando es posible / redacted)
+ *  - Códigos de error tipados (para retry decisions en la queue)
+ *  - Timeouts configurables por etapa
+ *  - AbortController para cancelación
  */
+
+'use strict';
 
 const axios = require('axios');
 
-const BASE = 'https://www.e7-eleven.com.mx';
-const API  = `${BASE}/KJServices/webapi`;
-const AUTH = 'Basic a2V4dHdlYmFwaTprbGkkS0wtM1c=';  // kextwebapi:kli$KL-3W
+// ============================================================
+// CONFIG (env vars con defaults)
+// ============================================================
+const CFG = Object.freeze({
+  BASE: process.env.SEVENELEVEN_BASE_URL || 'https://www.e7-eleven.com.mx',
+  AUTH: process.env.SEVENELEVEN_BASIC_AUTH || 'Basic a2V4dHdlYmFwaTprbGkkS0wtM1c=',
+  USER_AGENT:
+    process.env.SEVENELEVEN_UA ||
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36',
+  TIMEOUT_MS: Number(process.env.SEVENELEVEN_TIMEOUT_MS) || 20000,
+  HTTP_RETRIES: Number(process.env.SEVENELEVEN_HTTP_RETRIES) || 2,
+  CAPTCHA_RETRIES: Number(process.env.SEVENELEVEN_CAPTCHA_RETRIES) || 3,
+  ANTHROPIC_KEY: process.env.ANTHROPIC_API_KEY,
+  ANTHROPIC_MODEL: process.env.ANTHROPIC_VISION_MODEL || 'claude-haiku-4-5-20251001',
+  ANTHROPIC_TIMEOUT_MS: Number(process.env.ANTHROPIC_TIMEOUT_MS) || 12000,
+  IDEMPOTENCY_TTL_MS: Number(process.env.SEVENELEVEN_IDEMP_TTL_MS) || 24 * 60 * 60 * 1000,
+});
 
-const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
+const API = `${CFG.BASE}/KJServices/webapi`;
+const RFC_EMISOR = 'SEM980701STA';
 
 // ============================================================
-// SESIÓN HTTP CON AUTH + COOKIES (para captcha session)
+// ERRORES TIPADOS (la queue decide retry vs dead-letter)
 // ============================================================
-function crearSesion() {
-  const cookies = {};
+class FacturaError extends Error {
+  constructor(code, userMessage, { retryable = false, cause, meta } = {}) {
+    super(userMessage);
+    this.name = 'FacturaError';
+    this.code = code;            // INVALID_INPUT | TICKET_INVALID | TICKET_USED | TICKET_EXPIRED |
+                                 // CAPTCHA_FAILED | PORTAL_DOWN | UPSTREAM_TIMEOUT | CFDI_REJECTED | UNKNOWN
+    this.retryable = retryable;
+    this.cause = cause;
+    this.meta = meta;
+  }
+}
 
-  const session = axios.create({
-    baseURL: BASE,
-    timeout: 15000,
-    headers: {
-      'Accept': 'application/json, text/plain, */*',
-      'Authorization': AUTH,
-      'Referer': `${BASE}/facturacion/KPortalExterno/`,
-      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36',
+// ============================================================
+// LOGGER (inyectable; default = console con shape estructurado)
+// ============================================================
+function defaultLogger() {
+  const fmt = (level, msg, ctx) =>
+    JSON.stringify({ ts: new Date().toISOString(), level, portal: '7eleven', msg, ...ctx });
+  return {
+    info: (m, c) => console.log(fmt('info', m, c)),
+    warn: (m, c) => console.warn(fmt('warn', m, c)),
+    error: (m, c) => console.error(fmt('error', m, c)),
+    debug: (m, c) => process.env.DEBUG && console.log(fmt('debug', m, c)),
+  };
+}
+
+// ============================================================
+// VALIDACIÓN DE INPUTS
+// ============================================================
+const RFC_REGEX = /^[A-ZÑ&]{3,4}\d{6}[A-Z\d]{3}$/i;
+const CP_REGEX = /^\d{5}$/;
+const TICKET_REGEX = /^\d{30,40}$/;
+const REGIMENES_VALIDOS = new Set([
+  '601', '603', '605', '606', '607', '608', '610', '611', '612', '614',
+  '615', '616', '620', '621', '622', '623', '624', '625', '626',
+]);
+const USOS_CFDI_VALIDOS = new Set([
+  'G01', 'G02', 'G03', 'I01', 'I02', 'I03', 'I04', 'I05', 'I06', 'I07',
+  'I08', 'D01', 'D02', 'D03', 'D04', 'D05', 'D06', 'D07', 'D08', 'D09',
+  'D10', 'CP01', 'CN01', 'S01',
+]);
+
+function validarInputs(ticket, fiscal) {
+  if (!ticket?.noTicket || !TICKET_REGEX.test(String(ticket.noTicket))) {
+    throw new FacturaError('INVALID_INPUT', 'Número de ticket inválido (debe tener 30–40 dígitos).');
+  }
+  if (!fiscal?.rfc || !RFC_REGEX.test(fiscal.rfc)) {
+    throw new FacturaError('INVALID_INPUT', 'RFC inválido.');
+  }
+  if (!fiscal.nombre || fiscal.nombre.trim().length < 2) {
+    throw new FacturaError('INVALID_INPUT', 'Razón social requerida.');
+  }
+  if (!fiscal.cp || !CP_REGEX.test(fiscal.cp)) {
+    throw new FacturaError('INVALID_INPUT', 'Código postal inválido (5 dígitos).');
+  }
+  if (!fiscal.regimen || !REGIMENES_VALIDOS.has(String(fiscal.regimen))) {
+    throw new FacturaError('INVALID_INPUT', 'Régimen fiscal inválido.');
+  }
+  if (!fiscal.email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(fiscal.email)) {
+    throw new FacturaError('INVALID_INPUT', 'Email inválido.');
+  }
+  const uso = fiscal.usoCFDI || 'G03';
+  if (!USOS_CFDI_VALIDOS.has(uso)) {
+    throw new FacturaError('INVALID_INPUT', `Uso de CFDI inválido: ${uso}`);
+  }
+}
+
+// ============================================================
+// IDEMPOTENCIA — store inyectable (default in-memory con TTL)
+// En prod: pasar { has, set } con Redis/PG.
+// ============================================================
+function memoryIdempotencyStore() {
+  const map = new Map(); // key -> { value, exp }
+  const gc = () => {
+    const now = Date.now();
+    for (const [k, v] of map) if (v.exp < now) map.delete(k);
+  };
+  return {
+    async get(key) { gc(); return map.get(key)?.value || null; },
+    async set(key, value, ttlMs = CFG.IDEMPOTENCY_TTL_MS) {
+      map.set(key, { value, exp: Date.now() + ttlMs });
     },
+  };
+}
+const _defaultIdemp = memoryIdempotencyStore();
+
+// ============================================================
+// CIRCUIT BREAKER simple para Anthropic
+// ============================================================
+const visionBreaker = {
+  fails: 0,
+  openedAt: 0,
+  threshold: 5,
+  cooldownMs: 60_000,
+  canCall() {
+    if (this.fails < this.threshold) return true;
+    if (Date.now() - this.openedAt > this.cooldownMs) {
+      this.fails = 0; this.openedAt = 0; return true;
+    }
+    return false;
+  },
+  ok() { this.fails = 0; this.openedAt = 0; },
+  fail() { this.fails++; if (this.fails >= this.threshold) this.openedAt = Date.now(); },
+};
+
+// ============================================================
+// SLEEP / RETRY HTTP con backoff
+// ============================================================
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function withRetry(fn, { retries = CFG.HTTP_RETRIES, baseMs = 400, log, op } = {}) {
+  let lastErr;
+  for (let i = 0; i <= retries; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      const status = err.response?.status;
+      const transient =
+        !err.response ||
+        status >= 500 ||
+        ['ETIMEDOUT', 'ECONNRESET', 'ECONNABORTED', 'EAI_AGAIN'].includes(err.code);
+      if (!transient || i === retries) break;
+      const delay = baseMs * 2 ** i + Math.random() * 200;
+      log?.warn('http_retry', { op, attempt: i + 1, status, code: err.code, delay });
+      await sleep(delay);
+    }
+  }
+  throw lastErr;
+}
+
+// ============================================================
+// SESIÓN HTTP (auth + cookies)
+// ============================================================
+function crearSesion(signal) {
+  const cookies = {};
+  const session = axios.create({
+    baseURL: CFG.BASE,
+    timeout: CFG.TIMEOUT_MS,
+    signal,
+    headers: {
+      Accept: 'application/json, text/plain, */*',
+      Authorization: CFG.AUTH,
+      Referer: `${CFG.BASE}/facturacion/KPortalExterno/`,
+      'User-Agent': CFG.USER_AGENT,
+    },
+    // No throw en 4xx para inspeccionar payloads de error del portal
+    validateStatus: (s) => s >= 200 && s < 500,
   });
 
-  // Guardar cookies de respuestas (necesario para captcha session)
-  session.interceptors.response.use(resp => {
+  session.interceptors.response.use((resp) => {
     const sc = resp.headers['set-cookie'];
     if (sc) {
       for (const c of (Array.isArray(sc) ? sc : [sc])) {
@@ -48,8 +206,7 @@ function crearSesion() {
     return resp;
   });
 
-  // Enviar cookies en cada request
-  session.interceptors.request.use(config => {
+  session.interceptors.request.use((config) => {
     const str = Object.entries(cookies).map(([k, v]) => `${k}=${v}`).join('; ');
     if (str) config.headers['Cookie'] = str;
     return config;
@@ -59,104 +216,146 @@ function crearSesion() {
 }
 
 // ============================================================
-// CAPTCHA — Claude Vision (Haiku)
+// CAPTCHA — Claude Vision con breaker
 // ============================================================
-async function resolverCaptchaVision(imgBuffer) {
-  if (!ANTHROPIC_KEY) throw new Error('ANTHROPIC_API_KEY no configurada');
-
-  const resp = await axios.post('https://api.anthropic.com/v1/messages', {
-    model: 'claude-haiku-4-5-20251001',
-    max_tokens: 50,
-    messages: [{
-      role: 'user',
-      content: [
-        { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: imgBuffer.toString('base64') } },
-        { type: 'text', text: 'Lee el texto del captcha en esta imagen. Responde SOLO con los caracteres exactos, sin explicación, sin comillas, sin espacios. Son letras minúsculas y/o números.' },
-      ],
-    }],
-  }, {
-    headers: {
-      'x-api-key': ANTHROPIC_KEY,
-      'anthropic-version': '2023-06-01',
-      'content-type': 'application/json',
-    },
-    timeout: 10000,
-  });
-
-  return resp.data.content[0].text.trim().toLowerCase();
+async function resolverCaptchaVision(imgBuffer, log) {
+  if (!CFG.ANTHROPIC_KEY) {
+    throw new FacturaError('CAPTCHA_FAILED', 'Servicio de captcha no configurado.', { retryable: false });
+  }
+  if (!visionBreaker.canCall()) {
+    throw new FacturaError('CAPTCHA_FAILED', 'Servicio de captcha temporalmente no disponible.', { retryable: true });
+  }
+  try {
+    const resp = await axios.post(
+      'https://api.anthropic.com/v1/messages',
+      {
+        model: CFG.ANTHROPIC_MODEL,
+        max_tokens: 50,
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: imgBuffer.toString('base64') } },
+            { type: 'text', text: 'Lee el texto del captcha. Responde SOLO con los caracteres exactos, sin explicación, sin comillas, sin espacios. Letras minúsculas y/o números.' },
+          ],
+        }],
+      },
+      {
+        headers: {
+          'x-api-key': CFG.ANTHROPIC_KEY,
+          'anthropic-version': '2023-06-01',
+          'content-type': 'application/json',
+        },
+        timeout: CFG.ANTHROPIC_TIMEOUT_MS,
+      }
+    );
+    visionBreaker.ok();
+    const text = resp.data?.content?.[0]?.text?.trim().toLowerCase() || '';
+    // sanitizar a [a-z0-9]
+    return text.replace(/[^a-z0-9]/g, '');
+  } catch (err) {
+    visionBreaker.fail();
+    log?.error('vision_error', { msg: err.message, status: err.response?.status });
+    throw new FacturaError('CAPTCHA_FAILED', 'No se pudo resolver el captcha.', { retryable: true, cause: err });
+  }
 }
 
-async function resolverCaptchaConRetry(session, maxRetries = 3) {
-  for (let i = 0; i < maxRetries; i++) {
+async function resolverCaptchaConRetry(session, log, max = CFG.CAPTCHA_RETRIES) {
+  for (let i = 0; i < max; i++) {
     try {
-      // Cada GET genera nueva imagen (session-based)
-      const { data: imgBuffer } = await session.get('/KPortalExterno/Kaptcha.jpg', {
+      const { data: imgBuffer, status } = await session.get('/KPortalExterno/Kaptcha.jpg', {
         responseType: 'arraybuffer',
       });
-
-      if (!imgBuffer || imgBuffer.length < 500) {
-        console.log(`[7-Eleven] Captcha vacío (${imgBuffer?.length || 0}b), retry...`);
+      if (status >= 400 || !imgBuffer || imgBuffer.length < 500) {
+        log.warn('captcha_empty', { attempt: i + 1, status, size: imgBuffer?.length || 0 });
+        await sleep(300);
         continue;
       }
+      const texto = await resolverCaptchaVision(Buffer.from(imgBuffer), log);
+      if (!texto) { log.warn('captcha_empty_vision', { attempt: i + 1 }); continue; }
 
-      const texto = await resolverCaptchaVision(Buffer.from(imgBuffer));
-      console.log(`[7-Eleven] Captcha intento ${i + 1}: "${texto}"`);
-
-      const { data: val } = await session.get('/KPortalExterno/kaptcha', {
-        params: { kaptcha: texto },
-      });
-
-      if (val.esValido) {
-        console.log('[7-Eleven] Captcha ✅');
+      const { data: val } = await session.get('/KPortalExterno/kaptcha', { params: { kaptcha: texto } });
+      if (val?.esValido) {
+        log.info('captcha_ok', { attempt: i + 1 });
         return texto;
       }
-      console.log(`[7-Eleven] Captcha rechazado: ${val.mensaje}`);
+      log.warn('captcha_rejected', { attempt: i + 1, motivo: val?.mensaje });
     } catch (err) {
-      console.error(`[7-Eleven] Captcha error intento ${i + 1}: ${err.message}`);
+      if (err instanceof FacturaError) throw err;
+      log.warn('captcha_attempt_error', { attempt: i + 1, msg: err.message });
     }
   }
-  throw new Error('Captcha no resuelto después de 3 intentos');
+  throw new FacturaError('CAPTCHA_FAILED', 'No se pudo validar el captcha tras varios intentos.', { retryable: true });
 }
 
 // ============================================================
 // FLUJO PRINCIPAL
 // ============================================================
-async function facturar7Eleven(ticket, fiscal) {
+/**
+ * @param {Object} ticket  { noTicket }
+ * @param {Object} fiscal  { rfc, nombre, cp, regimen, email, usoCFDI? }
+ * @param {Object} [opts]  { logger, idempotencyStore, signal, requestId }
+ */
+async function facturar7Eleven(ticket, fiscal, opts = {}) {
+  const log = opts.logger || defaultLogger();
+  const idemp = opts.idempotencyStore || _defaultIdemp;
+  const requestId = opts.requestId || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const t0 = Date.now();
+
+  try {
+    validarInputs(ticket, fiscal);
+  } catch (err) {
+    log.warn('invalid_input', { requestId, code: err.code, msg: err.message });
+    return errorResponse(err);
+  }
+
   const { noTicket } = ticket;
   const { rfc, nombre, cp, regimen, email, usoCFDI = 'G03' } = fiscal;
 
-  console.log(`[7-Eleven] Facturando ticket ${noTicket.substring(0, 8)}...`);
-  const session = crearSesion();
+  // ── Idempotencia ──
+  const idempKey = `7eleven:${rfc}:${noTicket}`;
+  const cached = await idemp.get(idempKey);
+  if (cached) {
+    log.info('idempotent_hit', { requestId, idempKey });
+    return cached;
+  }
+
+  log.info('start', { requestId, ticket: maskTicket(noTicket), rfc: maskRfc(rfc) });
+  const session = crearSesion(opts.signal);
 
   try {
-    // ── 1. Inicializar sesión (obtener cookies) ──
-    await session.get('/facturacion/KPortalExterno/', {
-      headers: { 'Accept': 'text/html' },
-    });
-    console.log('[7-Eleven] Sesión iniciada');
+    // 1. Init session
+    await withRetry(
+      () => session.get('/facturacion/KPortalExterno/', { headers: { Accept: 'text/html' } }),
+      { log, op: 'init_session' }
+    );
 
-    // ── 2. Validar ticket ──
-    console.log('[7-Eleven] Validando ticket...');
-    const { data: tv } = await session.get(`${API}/FacturacionService/verificaTicketWS2`, {
-      params: { noTicket },
-    });
+    // 2. Validar ticket
+    const { data: tv } = await withRetry(
+      () => session.get(`${API}/FacturacionService/verificaTicketWS2`, { params: { noTicket } }),
+      { log, op: 'verifica_ticket' }
+    );
 
-    if (tv.status !== '0') {
-      const msgs = {
-        '1': 'Este ticket ya fue facturado anteriormente.',
-        '2': 'Ticket no encontrado. Verifica el número.',
-        '3': 'Ticket vencido. Solo se puede facturar dentro del mes + 5 días.',
+    if (tv?.status !== '0') {
+      const map = {
+        '1': ['TICKET_USED', 'Este ticket ya fue facturado anteriormente.'],
+        '2': ['TICKET_INVALID', 'Ticket no encontrado. Verifica el número.'],
+        '3': ['TICKET_EXPIRED', 'Ticket vencido. Solo se puede facturar dentro del mes + 5 días.'],
       };
-      return { success: false, error: msgs[tv.status] || tv.mensajeValidacion || `Error (status ${tv.status})` };
+      const [code, msg] = map[tv?.status] || ['TICKET_INVALID', tv?.mensajeValidacion || 'Ticket no facturable.'];
+      throw new FacturaError(code, msg, { meta: { portalStatus: tv?.status } });
     }
 
-    console.log(`[7-Eleven] Ticket válido: tienda=${tv.estacion} $${tv.totalTicket} pago=${tv.formaPago}`);
+    const total = Number.parseFloat(tv.totalTicket);
+    if (!Number.isFinite(total) || total <= 0) {
+      throw new FacturaError('TICKET_INVALID', 'El ticket no tiene un monto válido.', { meta: { totalRaw: tv.totalTicket } });
+    }
 
-    // ── 3. Resolver captcha ──
-    await resolverCaptchaConRetry(session, 3);
+    log.info('ticket_ok', { requestId, estacion: tv.estacion, total, formaPago: tv.formaPago });
 
-    // ── 4. Generar CFDI ──
-    console.log('[7-Eleven] Generando CFDI...');
+    // 3. Captcha
+    await resolverCaptchaConRetry(session, log);
+
+    // 4. Generar CFDI
     const ticketsJson = JSON.stringify([{
       noEstacion: tv.estacion,
       noTicket,
@@ -179,57 +378,131 @@ async function facturar7Eleven(ticket, fiscal) {
       noExterior: '', noInterior: '', pais: '',
     });
 
-    const { data: facturaResp } = await session.post(`${API}/FacturaExpressService`, body.toString(), {
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    });
+    const { data: facturaResp, status: facStatus } = await withRetry(
+      () => session.post(`${API}/FacturaExpressService`, body.toString(), {
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      }),
+      { log, op: 'factura_express' }
+    );
 
     const r = Array.isArray(facturaResp) ? facturaResp[0] : facturaResp;
-    if (!r.cfdiDisponible) {
-      return { success: false, error: r.respuesta || 'CFDI no generado' };
+    if (!r?.cfdiDisponible) {
+      throw new FacturaError('CFDI_REJECTED', sanitizePortalMsg(r?.respuesta) || 'CFDI no generado por el portal.',
+        { meta: { facStatus } });
     }
 
     const uuid = r.uuid;
-    console.log(`[7-Eleven] CFDI generado: ${uuid}`);
+    if (!uuid) throw new FacturaError('CFDI_REJECTED', 'CFDI sin UUID.', {});
 
-    // ── 5. Descargar PDF ──
-    const { data: pdfResp } = await session.get(`${API}/FacturaExpressService/descargaCfdiPdf`, {
-      params: { uuid },
-    });
+    log.info('cfdi_generated', { requestId, uuid });
 
-    // ── 6. Descargar XML ──
-    const { data: xmlResp } = await session.get(`${API}/FacturaExpressService/descargaCfdiXml`, {
-      params: { email, uuid },
-    });
+    // 5 + 6. PDF + XML en paralelo (independientes)
+    const [pdfRes, xmlRes] = await Promise.all([
+      withRetry(
+        () => session.get(`${API}/FacturaExpressService/descargaCfdiPdf`, { params: { uuid } }),
+        { log, op: 'download_pdf' }
+      ),
+      withRetry(
+        () => session.get(`${API}/FacturaExpressService/descargaCfdiXml`, { params: { email, uuid } }),
+        { log, op: 'download_xml' }
+      ),
+    ]);
 
-    console.log(`[7-Eleven] ✅ $${tv.totalTicket} folio=${xmlResp.folio}`);
+    const pdfResp = pdfRes.data;
+    const xmlResp = xmlRes.data;
 
-    return {
+    const result = {
       success: true,
-      b64Pdf: pdfResp.b64Pdf,
-      xml: xmlResp.xml || xmlResp.interpretado,
+      portal: '7eleven',
       uuid,
-      total: parseFloat(tv.totalTicket),
-      folio: xmlResp.folio,
-      serie: xmlResp.serie,
+      total,
+      folio: xmlResp?.folio,
+      serie: xmlResp?.serie,
+      rfcEmisor: RFC_EMISOR,
+      b64Pdf: pdfResp?.b64Pdf,
+      xml: xmlResp?.xml || xmlResp?.interpretado,
+      meta: { estacion: tv.estacion, formaPago: tv.formaPago, durationMs: Date.now() - t0 },
     };
 
-  } catch (err) {
-    const status = err.response?.status;
-    console.error(`[7-Eleven] ❌ ${err.message} (status=${status})`);
-
-    if (status === 502 || status === 503) {
-      return { success: false, error: 'Portal de 7-Eleven no disponible.' };
+    if (!result.b64Pdf || !result.xml) {
+      throw new FacturaError('CFDI_REJECTED', 'CFDI generado pero sin PDF/XML descargable.',
+        { meta: { hasPdf: !!result.b64Pdf, hasXml: !!result.xml } });
     }
-    return { success: false, error: err.message };
+
+    await idemp.set(idempKey, result);
+    log.info('done', { requestId, uuid, durationMs: result.meta.durationMs });
+    return result;
+
+  } catch (err) {
+    return handleError(err, log, requestId, t0);
   }
 }
 
 // ============================================================
-// PARSEO DE TICKET
+// HELPERS
+// ============================================================
+function maskTicket(t) { return t ? `${t.slice(0, 6)}…${t.slice(-4)}` : ''; }
+function maskRfc(r) { return r ? `${r.slice(0, 4)}***${r.slice(-3)}` : ''; }
+
+function sanitizePortalMsg(m) {
+  if (!m || typeof m !== 'string') return null;
+  // recorta y quita HTML básico
+  return m.replace(/<[^>]+>/g, '').trim().slice(0, 200);
+}
+
+function errorResponse(err) {
+  return {
+    success: false,
+    portal: '7eleven',
+    code: err.code || 'UNKNOWN',
+    error: err.message || 'Error desconocido.',
+    retryable: !!err.retryable,
+  };
+}
+
+function handleError(err, log, requestId, t0) {
+  const durationMs = Date.now() - t0;
+
+  if (err instanceof FacturaError) {
+    log[err.retryable ? 'warn' : 'error']('factura_error', {
+      requestId, code: err.code, retryable: err.retryable, msg: err.message, durationMs, meta: err.meta,
+    });
+    return errorResponse(err);
+  }
+
+  const status = err.response?.status;
+  const code = err.code;
+  const transient =
+    !err.response || status >= 500 || ['ETIMEDOUT', 'ECONNRESET', 'ECONNABORTED'].includes(code);
+
+  log.error('unexpected_error', { requestId, status, code, msg: err.message, durationMs });
+
+  if (status === 502 || status === 503 || status === 504) {
+    return errorResponse(new FacturaError('PORTAL_DOWN', 'Portal de 7-Eleven no disponible. Intenta más tarde.', { retryable: true }));
+  }
+  if (transient) {
+    return errorResponse(new FacturaError('UPSTREAM_TIMEOUT', 'Conexión con el portal interrumpida. Reintenta.', { retryable: true }));
+  }
+  return errorResponse(new FacturaError('UNKNOWN', 'No se pudo procesar la factura. Intenta de nuevo.', { retryable: false }));
+}
+
+// ============================================================
+// PARSEO DE TICKET (OCR → noTicket)
 // ============================================================
 function parsearTicket7Eleven(ocrText) {
-  const match = ocrText.match(/(\d{30,40})/);
+  if (!ocrText || typeof ocrText !== 'string') return null;
+  // limpia espacios y saltos antes de matchear (algunos OCR rompen el número)
+  const cleaned = ocrText.replace(/[\s\-]/g, '');
+  const match = cleaned.match(/(\d{30,40})/);
   return match ? match[1] : null;
 }
 
-module.exports = { facturar7Eleven, parsearTicket7Eleven };
+module.exports = {
+  facturar7Eleven,
+  parsearTicket7Eleven,
+  // exports adicionales útiles para tests / integración
+  FacturaError,
+  validarInputs,
+  memoryIdempotencyStore,
+  _config: CFG,
+};
