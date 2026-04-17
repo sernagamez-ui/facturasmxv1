@@ -7,7 +7,8 @@ const fs = require('fs');
 const path = require('path');
 
 const PORTAL_URL = 'https://facturacion.oxxogas.com';
-const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '../../data');
+const IS_RAILWAY = Boolean(process.env.RAILWAY_PROJECT_ID || process.env.RAILWAY_ENVIRONMENT_ID);
+const DATA_DIR = process.env.DATA_DIR || (IS_RAILWAY ? '/data' : path.join(__dirname, '../../data'));
 const SESSION_FILE = path.join(DATA_DIR, 'oxxogas-session.json');
 
 async function facturarOxxoGas({ estacion, noTicket, monto, userData, esEfectivo = false, outputDir }) {

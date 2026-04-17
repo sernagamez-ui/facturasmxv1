@@ -6,12 +6,15 @@ const Database = require('better-sqlite3');
 const path = require('path');
 const fs   = require('fs');
 
-const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '../data');
+const IS_RAILWAY = Boolean(process.env.RAILWAY_PROJECT_ID || process.env.RAILWAY_ENVIRONMENT_ID);
+const DATA_DIR = process.env.DATA_DIR || (IS_RAILWAY ? '/data' : path.join(__dirname, '../data'));
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
-const db = new Database(path.join(DATA_DIR, 'cotas.db'));
+const DB_PATH = path.join(DATA_DIR, 'cotas.db');
+const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
 db.pragma('busy_timeout = 5000');
+console.log(`[db] SQLite path: ${DB_PATH}`);
 
 function normalizeId(id) {
   const raw = String(id ?? '').trim();
