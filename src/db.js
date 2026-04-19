@@ -130,4 +130,42 @@ function setEstacionId(n, id){ stmts.setEst.run((n||'').toLowerCase().trim(), id
   if (sts) { const tx = db.transaction(() => { for (const [k,v] of Object.entries(sts)) stmts.setState.run(k,JSON.stringify(v)); }); tx(); }
 })();
 
-module.exports = { getUser, setUser, isOnboarded, getState, setState, guardarFactura, getFacturasMes, getFacturasMesAnteriorTodos, getEstacionId, setEstacionId };
+/** Diagnóstico runtime: misma ruta que usa SQLite (para /health y soporte). */
+function getStorageInfo() {
+  let userRows = 0;
+  let onboardedUsers = 0;
+  try {
+    userRows = db.prepare('SELECT COUNT(*) as c FROM users').get().c;
+    for (const row of db.prepare('SELECT data FROM users').all()) {
+      try {
+        const u = JSON.parse(row.data);
+        if (u?.rfc && u?.nombre && u?.cp && u?.regimen && u?.email) onboardedUsers++;
+      } catch {
+        // fila corrupta
+      }
+    }
+  } catch {
+    // DB no lista aún
+  }
+  return {
+    dataDirResolved: DATA_DIR,
+    dbPath: DB_PATH,
+    dbFilePresent: fs.existsSync(DB_PATH),
+    userRows,
+    onboardedUsers,
+  };
+}
+
+module.exports = {
+  getUser,
+  setUser,
+  isOnboarded,
+  getState,
+  setState,
+  guardarFactura,
+  getFacturasMes,
+  getFacturasMesAnteriorTodos,
+  getEstacionId,
+  setEstacionId,
+  getStorageInfo,
+};

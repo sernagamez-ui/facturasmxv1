@@ -73,7 +73,9 @@ async function handleTicket(ctx, fileId, userData) {
   // ── 5b. Si el portal necesita datos manuales, guardar estado de retry ─────
   console.log(
     `[ticketHandler] resultado.esperandoDatosAlsea=${resultado.esperandoDatosAlsea} ` +
-    `resultado.errorCode=${resultado.errorCode || 'n/a'} resultado.error=${resultado.error}`
+    `resultado.errorCode=${resultado.errorCode || 'n/a'} ` +
+    `portalStatus=${resultado.portalStatus || 'n/a'} ` +
+    `resultado.error=${resultado.error}`
   );
   if (resultado.esperandoDatosAlsea) {
     const retryState = {

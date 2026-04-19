@@ -342,6 +342,12 @@ async function facturar7Eleven(ticket, fiscal, opts = {}) {
         '3': ['TICKET_EXPIRED', 'Ticket vencido. Solo se puede facturar dentro del mes + 5 días.'],
       };
       const [code, msg] = map[tv?.status] || ['TICKET_INVALID', tv?.mensajeValidacion || 'Ticket no facturable.'];
+      log.warn('verifica_ticket_rechazado', {
+        requestId,
+        portalStatus: String(tv?.status ?? ''),
+        mensajeValidacion: String(tv?.mensajeValidacion || '').slice(0, 120),
+        ticket: maskTicket(noTicket),
+      });
       throw new FacturaError(code, msg, { meta: { portalStatus: tv?.status } });
     }
 
@@ -451,13 +457,17 @@ function sanitizePortalMsg(m) {
 }
 
 function errorResponse(err) {
-  return {
+  const out = {
     success: false,
     portal: '7eleven',
     code: err.code || 'UNKNOWN',
     error: err.message || 'Error desconocido.',
     retryable: !!err.retryable,
   };
+  if (err instanceof FacturaError && err.meta && err.meta.portalStatus !== undefined && err.meta.portalStatus !== null) {
+    out.portalStatus = String(err.meta.portalStatus);
+  }
+  return out;
 }
 
 function handleError(err, log, requestId, t0) {

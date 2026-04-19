@@ -22,6 +22,49 @@ function encolar(fn) {
   return res;
 }
 
+/**
+ * Genera variantes del folio largo 7-Eleven (30–40 dígitos) cuando el lector
+ * devuelve longitud atípica pero el portal sigue respondiendo TICKET_INVALID.
+ */
+function expand7ElevenNoTicketCandidates(rawList) {
+  const set = new Set();
+  const add = (s) => {
+    if (typeof s !== 'string' || !s) return;
+    const d = s.replace(/\D/g, '');
+    if (/^\d{30,40}$/.test(d)) set.add(d);
+  };
+
+  for (const raw of rawList) {
+    const d = String(raw || '').replace(/\D/g, '');
+    if (!d) continue;
+
+    add(d);
+
+    if (d.length > 40 && d.length <= 48) {
+      for (let len = 40; len >= 30; len--) {
+        add(d.slice(-len));
+        add(d.slice(0, len));
+      }
+    }
+
+    if (d.length === 36 || d.length === 37) {
+      add(d.slice(0, 35));
+      add(d.slice(0, 36));
+      add(d.slice(1, 36));
+      add(d.slice(1));
+      add(d.slice(-35));
+      add(d.slice(-36));
+    }
+
+    if (d.length === 34 || d.length === 33) {
+      add(`0${d}`);
+      if (d.length === 33) add(`00${d}`);
+    }
+  }
+
+  return [...set];
+}
+
 async function procesarFactura(ticketData, userData, phone) {
   const { comercio } = ticketData;
   const outputDir = path.join(os.tmpdir(), 'cotas', phone, Date.now().toString());
@@ -159,13 +202,30 @@ async function procesarFactura(ticketData, userData, phone) {
     } else if (comercio === '7eleven' || comercio === 'sieveEleven') {
       validar(ticketData, ['noTicket'], '7-Eleven');
 
-      const candidates = [...new Set([
+      const baseRaw = [
         ticketData.noTicket,
         ...(ticketData.noTicketCandidates || []),
-      ].map((v) => String(v || '').replace(/\D/g, '')).filter((v) => /^\d{30,40}$/.test(v)))];
+      ].map((v) => String(v || '').replace(/\D/g, ''));
+      const candidates = expand7ElevenNoTicketCandidates(baseRaw);
 
+      if (candidates.length === 0) {
+        return {
+          ok: false,
+          comercio,
+          error: '7eleven_folio_invalido',
+          errorCode: 'INVALID_INPUT',
+          userMessage:
+            '⚠️ No obtuve un número de ticket de 7-Eleven válido (30–40 dígitos). ' +
+            'Manda otra foto con el código de barras y el número de abajo bien nítidos.',
+        };
+      }
+
+      const MAX_INTENTOS = 12;
       let r = null;
+      let intentos = 0;
       for (const candidate of candidates) {
+        if (intentos >= MAX_INTENTOS) break;
+        intentos++;
         const intento = await facturar7Eleven(
           { noTicket: candidate },
           {
@@ -177,7 +237,10 @@ async function procesarFactura(ticketData, userData, phone) {
             usoCFDI: comercioUsoCFDI(comercio, userData),
           }
         );
-        console.log(`[facturaRouter][7eleven] intento code=${intento.code || 'ok'} ticket=***${candidate.slice(-6)}`);
+        console.log(
+          `[facturaRouter][7eleven] intento code=${intento.code || 'ok'} len=${candidate.length} ` +
+          `portalStatus=${intento.portalStatus || 'n/a'} ticket=***${candidate.slice(-6)}`
+        );
         if (intento.success) {
           ticketData.noTicket = candidate;
           r = intento;
@@ -194,7 +257,8 @@ async function procesarFactura(ticketData, userData, phone) {
           ok: false,
           error: r.error,
           errorCode: r.code || null,
-          userMessage: armarMensaje7ElevenError(r.error),
+          portalStatus: r.portalStatus || null,
+          userMessage: armarMensaje7ElevenError(r.error, r.code),
         };
       } else {
         // Escribir PDF y XML a archivos
@@ -321,10 +385,19 @@ function comercioUsoCFDI(comercio, userData) {
   return userData.usoCFDI || 'G03';
 }
 
-function armarMensaje7ElevenError(error) {
+function armarMensaje7ElevenError(error, errorCode) {
   if (!error) return '⚠️ Error desconocido al facturar en 7-Eleven.';
+  if (errorCode === 'TICKET_INVALID' || error.includes('Ticket no facturable') || error.includes('no encontrado')) {
+    return (
+      '🔍 *7-Eleven no reconoce este folio.*\n\n' +
+      'Lo más frecuente es que el número largo del código de barras se haya leído mal (un solo dígito mal ya invalida el ticket) o que el portal aún no lo tenga registrado.\n\n' +
+      'Prueba:\n' +
+      '• Foto más nítida con el código de barras *completo* y el número impreso debajo legible\n' +
+      '• Compara con el portal manual si el folio coincide\n' +
+      '• Si acabas de pagar, reintenta en unos minutos'
+    );
+  }
   if (error.includes('ya fue facturado'))   return '📋 Este ticket de 7-Eleven ya fue facturado anteriormente.';
-  if (error.includes('no encontrado'))      return '🔍 Ticket no encontrado. Verifica que el número sea correcto.';
   if (error.includes('vencido') || error.includes('mes'))
     return '📅 Este ticket ya venció. 7-Eleven permite facturar dentro del mes + los primeros 5 días del siguiente.';
   if (error.includes('captcha') || error.includes('Captcha'))
