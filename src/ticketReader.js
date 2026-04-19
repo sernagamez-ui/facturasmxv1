@@ -43,9 +43,10 @@ async function leerTicket(imageBuffer, mimeType = 'image/jpeg') {
   const comercio = await detectarComercio(base64, mimeType);
   const prompt   = elegirPrompt(comercio);
 
-  // Alsea: sin QR, los números deben ser exactos → Sonnet (más preciso)
+  // Alsea y 7-Eleven: dígitos deben ser exactos → Sonnet (más preciso)
   // Otros: Haiku es suficiente (tienen QR o campos más tolerantes)
-  const modelToUse = ALSEA_BRANDS.has(comercio) ? MODEL_SONNET : MODEL;
+  const modelToUse =
+    ALSEA_BRANDS.has(comercio) || comercio === '7eleven' ? MODEL_SONNET : MODEL;
 
   const response = await client.messages.create({
     model: modelToUse,
@@ -82,9 +83,10 @@ async function leerTicket(imageBuffer, mimeType = 'image/jpeg') {
 async function completarNoTicket7Eleven(ticketData, base64, mimeType) {
   const current = String(ticketData?.noTicket || '').replace(/\D/g, '');
   const candidates = [];
-  if (/^\d{30,40}$/.test(current)) candidates.push(current);
+  // Barcode primero: suele ser más fiable que OCR del texto impreso.
   const barcodeCandidates = await leerCodigoBarras7Eleven(Buffer.from(base64, 'base64'));
   candidates.push(...barcodeCandidates);
+  if (/^\d{30,40}$/.test(current)) candidates.push(current);
 
   try {
     const response = await client.messages.create({
@@ -131,32 +133,90 @@ async function completarNoTicket7Eleven(ticketData, base64, mimeType) {
   return { ...ticketData, noTicketCandidates: [] };
 }
 
-async function leerCodigoBarras7Eleven(imageBuffer) {
-  try {
-    const { readBarcodesFromImageData } = require('zxing-wasm/reader');
-    const image = await Jimp.fromBuffer(imageBuffer);
-    const { data, width, height } = image.bitmap;
-    const imageData = { data: new Uint8ClampedArray(data), width, height };
+const ZXING_7ELEVEN_FORMATS = [
+  'Code128', 'Code39', 'ITF', 'EAN13', 'UPCA', 'Codabar', 'Code93',
+];
 
-    const results = await readBarcodesFromImageData(imageData, {
-      formats: ['Code128', 'Code39', 'ITF', 'EAN13', 'UPCA'],
+async function leerCodigoBarras7Eleven(imageBuffer) {
+  const { readBarcodesFromImageData } = require('zxing-wasm/reader');
+  const seen = new Set();
+  const extracted = [];
+
+  function collectFromResults(results) {
+    if (!Array.isArray(results) || results.length === 0) return;
+    for (const r of results) {
+      const val = String(r?.text || '').replace(/\D/g, '');
+      if (/^\d{30,40}$/.test(val) && !seen.has(val)) {
+        seen.add(val);
+        extracted.push(val);
+      }
+    }
+  }
+
+  async function scanOne(jimpImage) {
+    const { data, width, height } = jimpImage.bitmap;
+    const imageData = { data: new Uint8ClampedArray(data), width, height };
+    let results = await readBarcodesFromImageData(imageData, {
+      formats: ZXING_7ELEVEN_FORMATS,
       tryHarder: true,
     });
+    collectFromResults(results);
+    results = await readBarcodesFromImageData(imageData, { tryHarder: true });
+    collectFromResults(results);
+  }
 
-    if (!Array.isArray(results) || results.length === 0) return [];
+  try {
+    const base = await Jimp.fromBuffer(imageBuffer);
+    const W = base.bitmap.width;
+    const H = base.bitmap.height;
 
-    const extracted = results
-      .map((r) => String(r?.text || '').replace(/\D/g, ''))
-      .filter((val) => /^\d{30,40}$/.test(val));
-
-    if (extracted.length > 0) {
-      console.log('[ticketReader] Barcode 7-Eleven detectado:', extracted[0]);
+    const crops = [{ label: 'full', img: base.clone() }];
+    for (const frac of [0.45, 0.35, 0.28]) {
+      const ch = Math.max(120, Math.floor(H * frac));
+      const cy = Math.max(0, H - ch);
+      try {
+        crops.push({
+          label: `bottom_${Math.round(frac * 100)}pct`,
+          img: base.clone().crop({ x: 0, y: cy, w: W, h: ch }),
+        });
+      } catch {
+        // crop API distinta en alguna versión de Jimp
+        try {
+          crops.push({
+            label: `bottom_${Math.round(frac * 100)}pct`,
+            img: base.clone().crop(0, cy, W, ch),
+          });
+        } catch (e2) {
+          console.log('[ticketReader] Barcode crop omitido:', e2.message);
+        }
+      }
     }
-    return extracted;
+
+    for (const { label, img } of crops) {
+      const variants = [
+        { name: 'raw', j: img.clone() },
+        { name: 'grey_norm', j: img.clone().greyscale().normalize() },
+        { name: 'scale1.5', j: img.clone().scale(1.5) },
+        { name: 'scale2_grey', j: img.clone().scale(2).greyscale().normalize() },
+        { name: 'scale2.5', j: img.clone().scale(2.5) },
+      ];
+      for (const { name, j } of variants) {
+        try {
+          await scanOne(j);
+        } catch (err) {
+          console.log(`[ticketReader] Barcode scan ${label}/${name}:`, err.message);
+        }
+      }
+    }
   } catch (err) {
     console.log('[ticketReader] Barcode 7-Eleven falló:', err.message);
-    return [];
   }
+
+  if (extracted.length > 0) {
+    console.log(`[ticketReader] Barcode 7-Eleven: ${extracted.length} candidato(s)`);
+  }
+
+  return extracted;
 }
 
 // ─────────────────────────────────────────────
