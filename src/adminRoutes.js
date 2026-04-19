@@ -6,9 +6,9 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const router = express.Router();
+const { resolveDataDir } = require('./dataDir');
 
-const IS_RAILWAY = Boolean(process.env.RAILWAY_PROJECT_ID || process.env.RAILWAY_ENVIRONMENT_ID);
-const DATA_DIR     = process.env.DATA_DIR || (IS_RAILWAY ? '/data' : './data');
+const DATA_DIR = resolveDataDir();
 const SESSION_FILE = path.join(DATA_DIR, 'oxxogas-session.json');
 
 function requireAdmin(req, res, next) {

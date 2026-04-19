@@ -5,9 +5,9 @@
 const Database = require('better-sqlite3');
 const path = require('path');
 const fs   = require('fs');
+const { resolveDataDir, IS_RAILWAY, hasRailwayVolume } = require('./dataDir');
 
-const IS_RAILWAY = Boolean(process.env.RAILWAY_PROJECT_ID || process.env.RAILWAY_ENVIRONMENT_ID);
-const DATA_DIR = process.env.DATA_DIR || (IS_RAILWAY ? '/data' : path.join(__dirname, '../data'));
+const DATA_DIR = resolveDataDir();
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
 const DB_PATH = path.join(DATA_DIR, 'cotas.db');
@@ -15,6 +15,13 @@ const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
 db.pragma('busy_timeout = 5000');
 console.log(`[db] SQLite path: ${DB_PATH}`);
+if (IS_RAILWAY && !hasRailwayVolume()) {
+  console.warn(
+    '[db] Railway: no se detectó volumen persistente (RAILWAY_VOLUME_NAME / RAILWAY_VOLUME_MOUNT_PATH). ' +
+      'Sin volumen montado en este servicio, los datos se pierden en cada redeploy. ' +
+      'En Railway: Service → + Volume → mount path igual a DATA_DIR (p. ej. /data).'
+  );
+}
 
 function normalizeId(id) {
   const raw = String(id ?? '').trim();
@@ -153,6 +160,9 @@ function getStorageInfo() {
     dbFilePresent: fs.existsSync(DB_PATH),
     userRows,
     onboardedUsers,
+    railwayVolumeAttached: hasRailwayVolume(),
+    railwayVolumeName: process.env.RAILWAY_VOLUME_NAME || null,
+    railwayVolumeMountPath: process.env.RAILWAY_VOLUME_MOUNT_PATH || null,
   };
 }
 
