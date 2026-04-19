@@ -41,6 +41,31 @@ const CFG = Object.freeze({
 const API = `${CFG.BASE}/KJServices/webapi`;
 const RFC_EMISOR = 'SEM980701STA';
 
+function esCuerpoHtmlPortal(data) {
+  if (typeof data !== 'string') return false;
+  const t = data.trim().slice(0, 64).toLowerCase();
+  return t.startsWith('<!') || t.startsWith('<html') || t.includes('403 forbidden') || t.includes('401 unauthorized');
+}
+
+/** Proxy HTTP(S) opcional (datacenters suelen recibir 403 del WAF de 7-Eleven). */
+function proxyAxiosDesdeEnv() {
+  const raw = process.env.SEVENELEVEN_HTTP_PROXY || process.env.SEVENELEVEN_PROXY || '';
+  if (!raw.trim()) return undefined;
+  try {
+    const u = new URL(raw.trim());
+    const port = u.port ? parseInt(u.port, 10) : (u.protocol === 'https:' ? 443 : 80);
+    const auth = u.username
+      ? {
+        username: decodeURIComponent(u.username),
+        password: decodeURIComponent(u.password || ''),
+      }
+      : undefined;
+    return { protocol: u.protocol.replace(':', ''), host: u.hostname, port, auth };
+  } catch {
+    return undefined;
+  }
+}
+
 // ============================================================
 // ERRORES TIPADOS (la queue decide retry vs dead-letter)
 // ============================================================
@@ -180,14 +205,21 @@ async function withRetry(fn, { retries = CFG.HTTP_RETRIES, baseMs = 400, log, op
 // ============================================================
 function crearSesion(signal) {
   const cookies = {};
+  const proxy = proxyAxiosDesdeEnv();
   const session = axios.create({
     baseURL: CFG.BASE,
     timeout: CFG.TIMEOUT_MS,
     signal,
+    ...(proxy ? { proxy } : {}),
     headers: {
       Accept: 'application/json, text/plain, */*',
       Authorization: CFG.AUTH,
       Referer: `${CFG.BASE}/facturacion/KPortalExterno/`,
+      Origin: CFG.BASE,
+      'Accept-Language': 'es-MX,es;q=0.9,en;q=0.8',
+      'Sec-Fetch-Dest': 'empty',
+      'Sec-Fetch-Mode': 'cors',
+      'Sec-Fetch-Site': 'same-origin',
       'User-Agent': CFG.USER_AGENT,
     },
     // No throw en 4xx para inspeccionar payloads de error del portal
@@ -322,20 +354,55 @@ async function facturar7Eleven(ticket, fiscal, opts = {}) {
   log.info('start', { requestId, ticket: maskTicket(noTicket), rfc: maskRfc(rfc) });
   const session = crearSesion(opts.signal);
 
+  const msgPortal403 =
+    '7-Eleven respondió 403 (bloqueo). Desde servidores en la nube (p. ej. Railway) el portal suele rechazar la IP. ' +
+    'Opciones: configurar `SEVENELEVEN_HTTP_PROXY` con un proxy residencial en México, o ejecutar Cotas en tu PC/red local.';
+
   try {
     // 1. Init session
-    await withRetry(
+    const initResp = await withRetry(
       () => session.get('/facturacion/KPortalExterno/', { headers: { Accept: 'text/html' } }),
       { log, op: 'init_session' }
     );
+    if ([401, 403, 429].includes(initResp.status)) {
+      throw new FacturaError('PORTAL_FORBIDDEN', msgPortal403, {
+        retryable: false,
+        meta: { httpStatus: initResp.status, op: 'init_session' },
+      });
+    }
 
     // 2. Validar ticket
-    const { data: tv } = await withRetry(
+    const verificaResp = await withRetry(
       () => session.get(`${API}/FacturacionService/verificaTicketWS2`, { params: { noTicket } }),
       { log, op: 'verifica_ticket' }
     );
+    const tv = verificaResp.data;
 
-    const statusNorm = tv != null && tv.status !== undefined && tv.status !== null
+    if ([401, 403, 429].includes(verificaResp.status)) {
+      throw new FacturaError('PORTAL_FORBIDDEN', msgPortal403, {
+        retryable: false,
+        meta: { httpStatus: verificaResp.status, op: 'verifica_ticket' },
+      });
+    }
+    if (typeof tv === 'string' && esCuerpoHtmlPortal(tv)) {
+      throw new FacturaError('PORTAL_FORBIDDEN', msgPortal403, {
+        retryable: false,
+        meta: {
+          httpStatus: verificaResp.status,
+          op: 'verifica_ticket',
+          portalSnippet: tv.slice(0, 280),
+        },
+      });
+    }
+    if (tv == null || typeof tv !== 'object' || Array.isArray(tv)) {
+      throw new FacturaError(
+        'PORTAL_DOWN',
+        'Respuesta inesperada del portal de 7-Eleven al validar el ticket.',
+        { retryable: true, meta: { httpStatus: verificaResp.status, sample: String(tv).slice(0, 120) } }
+      );
+    }
+
+    const statusNorm = tv.status !== undefined && tv.status !== null
       ? String(tv.status).trim()
       : '';
 
@@ -480,6 +547,8 @@ function errorResponse(err) {
   if (isFactura && err.meta) {
     if (err.meta.portalStatus !== undefined && err.meta.portalStatus !== null) {
       out.portalStatus = String(err.meta.portalStatus);
+    } else if (err.meta.httpStatus !== undefined && err.meta.httpStatus !== null) {
+      out.portalStatus = `http_${err.meta.httpStatus}`;
     }
     if (err.meta.portalSnippet) {
       out.portalSnippet = err.meta.portalSnippet;

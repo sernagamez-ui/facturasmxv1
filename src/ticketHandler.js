@@ -17,6 +17,7 @@ const nodemailer = require('nodemailer');
 const { leerTicket }                                      = require('./ticketReader');
 const { procesarFactura }                                 = require('./facturaRouter');
 const { calcularDeducibilidadGasolina }                   = require('./deducibilidad');
+const { clasificarGasto }                                 = require('./fiscalRules');
 const db                                                  = require('./db');
 
 /**
@@ -48,7 +49,8 @@ async function handleTicket(ctx, fileId, userData) {
 
   if (!ticketData || !ticketData.comercio) {
     return {
-      mensajeBot: '❓ No reconocí el tipo de ticket. Por ahora proceso gasolineras: Petro 7, OXXO Gas, Orsan y Pemex.',
+      mensajeBot:
+        '❓ No reconocí el tipo de ticket. Por ahora proceso: Petro 7, OXXO Gas, Orsan, Pemex, 🏪 OXXO tienda, Alsea y HEB.',
     };
   }
 
@@ -236,7 +238,8 @@ async function enviarXmlPorEmail(email, xmlPath, uuid) {
 
 function _nombreComercio(comercio) {
   const nombres = {
-    petro7: 'Petro 7', oxxogas: 'OXXO Gas', orsan: 'Orsan', mobil_nl: 'Mobil NL', pemex: 'Pemex',
+    petro7: 'Petro 7', oxxogas: 'OXXO Gas', oxxo: 'OXXO',
+    orsan: 'Orsan', mobil_nl: 'Mobil NL', pemex: 'Pemex',
     alsea: 'Alsea', starbucks: 'Starbucks', dominos: "Domino's", burgerking: 'Burger King',
     chilis: "Chili's", cpk: 'California Pizza Kitchen', pfchangs: "P.F. Chang's",
     italiannis: "Italianni's", vips: 'VIPS', popeyes: 'Popeyes',
@@ -247,10 +250,13 @@ function _nombreComercio(comercio) {
 
 function _mensajeExito(ticketData, resultado, userData, xmlEnviado) {
   const nombre  = _nombreComercio(ticketData.comercio);
+  const gasto   = clasificarGasto(ticketData.comercio);
+  const iconLinea = gasto.icon || '📄';
+  const esCombustible = gasto.categoria === 'combustible';
   const esDeducible = !['605'].includes(userData.regimen) && !ticketData.esEfectivo;
 
   let msg = `✅ *¡Factura lista!*\n\n`;
-  msg += `⛽ ${nombre}\n`;
+  msg += `${iconLinea} ${nombre}\n`;
   if (ticketData.tipoGasolina) msg += `🛢 ${ticketData.tipoGasolina}\n`;
   if (ticketData.litros)       msg += `🔢 ${ticketData.litros}L\n`;
   if (ticketData.total)        msg += `💰 $${Number(ticketData.total).toFixed(2)}\n`;
@@ -264,7 +270,9 @@ function _mensajeExito(ticketData, resultado, userData, xmlEnviado) {
     msg += `✅ *Deducible al 100%*\n`;
     msg += `💚 IVA acreditable: $${iva.toFixed(2)}\n\n`;
   } else if (userData.regimen === '605') {
-    msg += `ℹ️ Como asalariado, la gasolina no es deducible en tu declaración anual.\n\n`;
+    msg += esCombustible
+      ? `ℹ️ Como asalariado, la gasolina no es deducible en tu declaración anual.\n\n`
+      : `ℹ️ Régimen 605: este tipo de gasto no es deducible en tu declaración anual.\n\n`;
   }
 
   msg += `📄 PDF adjunto arriba\n`;

@@ -7,6 +7,7 @@ const path = require('path');
 
 const { facturarPetro7 }       = require('./portales/petro7');
 const { facturarOxxoGas }      = require('./portales/oxxogas');
+const { facturarOxxoTienda }   = require('./portales/oxxoTienda');
 const { generarFacturaHEB }    = require('./portales/heb');
 const { facturarAlsea }        = require('./portales/alsea');
 const { facturar7Eleven }     = require('./portales/7eleven');
@@ -174,6 +175,18 @@ async function procesarFactura(ticketData, userData, phone) {
         outputDir,
       }));
 
+    // ── OXXO tienda (conveniencia) ───────────────────────────────────────
+    } else if (comercio === 'oxxo') {
+      validar(ticketData, ['folio', 'venta', 'fecha', 'total'], 'OXXO');
+      resultado = await facturarOxxoTienda({
+        fecha: ticketData.fecha,
+        folio: ticketData.folio,
+        venta: ticketData.venta,
+        total: ticketData.total,
+        userData,
+        outputDir,
+      });
+
     // ── HEB ─────────────────────────────────────────────────────────────
     } else if (comercio === 'heb') {
       validar(ticketData, ['sucursal', 'noTicket', 'fecha', 'total'], 'HEB');
@@ -324,7 +337,7 @@ function validar(data, campos, nombre) {
 
 function armarMensajeExito(resultado, ticketData, userData, comercio) {
   const nombres = {
-    petro7: 'Petro 7', oxxogas: 'OXXO Gas', heb: 'HEB',
+    petro7: 'Petro 7', oxxogas: 'OXXO Gas', oxxo: 'OXXO', heb: 'HEB',
     '7eleven': '7-Eleven', sieveEleven: '7-Eleven',
     // Alsea brands
     starbucks: 'Starbucks', dominos: "Domino's", burgerking: 'Burger King',
@@ -358,7 +371,7 @@ function armarMensajeExito(resultado, ticketData, userData, comercio) {
 
 function armarMensajeError(error, comercio) {
   const nombres = {
-    petro7: 'Petro 7', oxxogas: 'OXXO Gas', heb: 'HEB',
+    petro7: 'Petro 7', oxxogas: 'OXXO Gas', oxxo: 'OXXO', heb: 'HEB',
     '7eleven': '7-Eleven', sieveEleven: '7-Eleven',
     starbucks: 'Starbucks', dominos: "Domino's", burgerking: 'Burger King',
     chilis: "Chili's", cpk: 'California Pizza Kitchen', pfchangs: "P.F. Chang's",
@@ -389,6 +402,16 @@ function comercioUsoCFDI(comercio, userData) {
 
 function armarMensaje7ElevenError(error, errorCode) {
   if (!error) return '⚠️ Error desconocido al facturar en 7-Eleven.';
+  if (errorCode === 'PORTAL_FORBIDDEN' || error.includes('403') || error.includes('bloqueo')) {
+    return (
+      '🚫 *7-Eleven bloqueó la conexión desde este servidor (403).*\n\n' +
+      'No es un error de tu ticket: el portal suele rechazar IPs de datacenters (Railway, etc.).\n\n' +
+      '*Qué puedes hacer:*\n' +
+      '• Configura en Railway la variable `SEVENELEVEN_HTTP_PROXY` con un proxy HTTP residencial en México\n' +
+      '• O corre Cotas en tu máquina local / red de casa (misma IP que usarías en el navegador)\n\n' +
+      '_Sin eso, la facturación automática de 7-Eleven desde la nube no es confiable._'
+    );
+  }
   if (errorCode === 'TICKET_INVALID' || error.includes('Ticket no facturable') || error.includes('no encontrado')) {
     return (
       '🔍 *7-Eleven no reconoce este folio.*\n\n' +

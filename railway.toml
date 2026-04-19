@@ -1,0 +1,7 @@
+# Railway combina esto con el dashboard. Si hay Dockerfile en la raíz, el build lo usa automáticamente.
+# https://docs.railway.com/reference/config-as-code
+
+[deploy]
+healthcheckPath = "/health"
+healthcheckTimeout = 120
+restartPolicyType = "ON_FAILURE"

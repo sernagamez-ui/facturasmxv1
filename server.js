@@ -255,7 +255,10 @@ bot.on('photo', async (ctx) => {
 
   if (!ticketData || !ticketData.comercio) {
     await bot.telegram.deleteMessage(chatId, msg.message_id).catch(() => {});
-    return ctx.reply('❓ No reconocí el tipo de ticket. Por ahora proceso gasolineras (Petro 7, OXXO Gas), restaurantes Alsea y HEB.');
+    return ctx.reply(
+      '❓ No reconocí el tipo de ticket. Por ahora proceso: gasolineras (Petro 7, OXXO Gas), ' +
+      '🏪 OXXO tienda, restaurantes Alsea y HEB.'
+    );
   }
 
   // ── 3. Verificar si necesita selección de uso CFDI ───────────────────────
@@ -390,6 +393,7 @@ async function handleAyuda(ctx) {
     '2. En ~2 minutos tramito tu factura\n' +
     '3. Recibes PDF aquí y XML a tu correo\n\n' +
     '⛽ *Gasolineras:* Petro 7, OXXO Gas\n' +
+    '🏪 *Tiendas:* OXXO\n' +
     '🍽️ *Restaurantes:* Starbucks, Domino\'s, BK, Chili\'s y más (Alsea)\n' +
     '🛒 *Supermercados:* HEB\n\n' +
     '⚠️ Solo tickets pagados con *tarjeta*. Efectivo no es deducible ante el SAT.',
@@ -455,11 +459,14 @@ if (process.env.WEBHOOK_URL) {
 }
 
 function gracefulStop(signal) {
-  if (!isPollingActive) return;
   try {
+    // Webhook: no hubo `launch()` → `stop()` lanzaría "Bot is not running!".
+    if (typeof isPollingActive !== 'undefined' && !isPollingActive) return;
     bot.stop(signal);
   } catch (err) {
-    console.warn(`[Cotas] Error al detener bot (${signal}): ${err.message}`);
+    const msg = String(err?.message || err);
+    if (msg.includes('not running')) return;
+    console.warn(`[Cotas] Error al detener bot (${signal}): ${msg}`);
   }
 }
 

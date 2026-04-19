@@ -1,0 +1,14 @@
+node_modules
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+data
+*.log
+tmp
+.DS_Store
+oxxogas-session.json
+coverage
+*.md
+!README.md

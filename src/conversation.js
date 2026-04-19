@@ -248,6 +248,8 @@ async function flujoOnboarding(phone, msg) {
         msg += `  • BP\n`;
         msg += `  • G500\n`;
         msg += `  • Mobil\n`;
+        msg += `\n*Tiendas*\n`;
+        msg += `  • OXXO ✅\n`;
         msg += `\n━━━━━━━━━━━━━━━\n`;
         msg += `📸 Mándame la foto de cualquier ticket de los comercios activos y facturo en segundos.`;
 
@@ -255,7 +257,7 @@ async function flujoOnboarding(phone, msg) {
       }).catch(err => {
         console.error('[onboarding] Error en registro de portales:', err.message);
         wa.sendText(phone,
-          `⛽ *Puedes facturar en:*\n• Petro 7 ✅\n• OXXO Gas ✅\n\n📸 Mándame la foto de tu ticket.`
+          `⛽ *Puedes facturar en:*\n• Petro 7 ✅\n• OXXO Gas ✅\n• OXXO tienda ✅\n\n📸 Mándame la foto de tu ticket.`
         ).catch(console.error);
       });
 
@@ -306,16 +308,21 @@ async function procesarTicket(phone, imageBuffer, mimeType) {
     return;
   }
 
-  if (!['petro7', 'oxxogas'].includes(ticketData.comercio)) {
+  if (!['petro7', 'oxxogas', 'oxxo'].includes(ticketData.comercio)) {
     await wa.sendText(phone,
       `ℹ️ Detecté un ticket de *${ticketData.comercio || 'este comercio'}*.\n\n` +
-      `Por ahora solo facturo automáticamente:\n• ⛽ Petro 7\n• ⛽ OXXO Gas\n\n` +
+      `Por ahora solo facturo automáticamente:\n• ⛽ Petro 7\n• ⛽ OXXO Gas\n• 🏪 OXXO (tienda)\n\n` +
       `Próximamente más establecimientos.`
     );
     return;
   }
 
-  const nombreComercio = ticketData.comercio === 'petro7' ? 'Petro 7' : 'OXXO Gas';
+  const nombreComercio =
+    ticketData.comercio === 'petro7'
+      ? 'Petro 7'
+      : ticketData.comercio === 'oxxo'
+        ? 'OXXO'
+        : 'OXXO Gas';
   await wa.sendText(phone, `⏳ Tramitando tu factura de *${nombreComercio}*... (puede tardar ~1 minuto)`);
 
   const resultado = await procesarFactura(ticketData, user, phone);

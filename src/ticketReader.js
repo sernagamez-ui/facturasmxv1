@@ -46,7 +46,9 @@ async function leerTicket(imageBuffer, mimeType = 'image/jpeg') {
   // Alsea y 7-Eleven: dígitos deben ser exactos → Sonnet (más preciso)
   // Otros: Haiku es suficiente (tienen QR o campos más tolerantes)
   const modelToUse =
-    ALSEA_BRANDS.has(comercio) || comercio === '7eleven' ? MODEL_SONNET : MODEL;
+    ALSEA_BRANDS.has(comercio) || comercio === '7eleven' || comercio === 'oxxo'
+      ? MODEL_SONNET
+      : MODEL;
 
   const response = await client.messages.create({
     model: modelToUse,
@@ -441,6 +443,7 @@ function elegirPrompt(comercio) {
   switch (comercio) {
     case 'petro7':  return promptPetro7();
     case 'oxxogas': return promptOxxoGas();
+    case 'oxxo':    return promptOxxoTienda();
     case 'heb':     return promptHEB();
     case '7eleven': return prompt7Eleven();
     default:        return promptGeneral();
@@ -577,6 +580,39 @@ REGLAS CRÍTICAS:
 - El número de "Afiliación" NO es el folio ni la estación
 - Si fecha dice "MAR 24 26" es 2026-03-24
 - Responde SOLO con el JSON, sin texto adicional.`;
+}
+
+// ─────────────────────────────────────────────
+// PROMPT — OXXO tienda (conveniencia)
+// ─────────────────────────────────────────────
+
+function promptOxxoTienda() {
+  const anioActual = new Date().getFullYear();
+  return `Analiza este ticket de OXXO (tienda de conveniencia, NO gasolinera OXXO Gas) y extrae los datos en formato JSON.
+
+El portal de facturación pide cuatro datos del ticket:
+- Fecha de compra
+- Folio (número de folio de venta, solo dígitos)
+- Código de venta / transacción (cadena alfanumérica, ej. 10ZAI50ZRC1)
+- Total a pagar
+
+{
+  "encontrado": true,
+  "comercio": "oxxo",
+  "folio": "número de FOLIO de venta (solo dígitos, sin espacios)",
+  "venta": "código alfanumérico de la venta/transacción (mezcla de letras y números como en el ticket)",
+  "fecha": "YYYY-MM-DD",
+  "total": número decimal (total pagado con IVA),
+  "metodoPago": "efectivo" o "tarjeta" o null
+}
+
+REGLAS:
+- "folio" es el número corto de folio de venta (suele ser puros dígitos). NO confundas con el código largo alfanumérico.
+- "venta" es el código alfanumérico que el portal pide junto al folio (a veces etiquetado como venta, transacción o similar).
+- Si el ticket muestra fecha DD/MM/AAAA, convierte a YYYY-MM-DD. El año actual es ${anioActual}.
+- El total es el monto final pagado (con IVA), no el subtotal.
+
+Responde SOLO con el JSON, sin texto adicional.`;
 }
 
 // ─────────────────────────────────────────────
