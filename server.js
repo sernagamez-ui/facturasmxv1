@@ -423,10 +423,13 @@ let isPollingActive = false;
 
 // Health endpoint para Railway
 app.get('/health', (_req, res) => {
+  const dataDir = process.env.DATA_DIR || (IS_RAILWAY ? '/data' : path.join(__dirname, 'data'));
   res.status(200).json({
     ok: true,
     ts: new Date().toISOString(),
     mode: WEBHOOK_URL ? 'webhook' : (IS_RAILWAY ? 'webhook-auto' : 'polling'),
+    isRailway: IS_RAILWAY,
+    dataDir,
   });
 });
 
