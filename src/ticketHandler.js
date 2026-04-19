@@ -75,6 +75,7 @@ async function handleTicket(ctx, fileId, userData) {
     `[ticketHandler] resultado.esperandoDatosAlsea=${resultado.esperandoDatosAlsea} ` +
     `resultado.errorCode=${resultado.errorCode || 'n/a'} ` +
     `portalStatus=${resultado.portalStatus || 'n/a'} ` +
+    `snippet=${(resultado.portalSnippet || '').slice(0, 160)} ` +
     `resultado.error=${resultado.error}`
   );
   if (resultado.esperandoDatosAlsea) {

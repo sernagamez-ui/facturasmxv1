@@ -22,6 +22,8 @@ const { verificarUsoCfdi, generarBotonesUsoCfdi, guardarEstadoEsperandoUsoCfdi, 
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
 const app = express();
 const IS_RAILWAY = Boolean(process.env.RAILWAY_PROJECT_ID || process.env.RAILWAY_ENVIRONMENT_ID);
+/** Solo true después de `bot.launch()` (polling). En webhook no hay launch → no llamar `bot.stop()`. */
+let isPollingActive = false;
 
 // Health: usa la misma resolución de rutas que `src/db.js` (evita falsos positivos).
 app.get('/health', (_req, res) => {
@@ -442,11 +444,24 @@ if (process.env.WEBHOOK_URL) {
   });
 } else {
   // Modo polling (desarrollo local)
-  bot.telegram.deleteWebhook({ drop_pending_updates: true }).then(() => {
-    bot.launch();
+  bot.telegram.deleteWebhook({ drop_pending_updates: true }).then(async () => {
+    await bot.launch();
+    isPollingActive = true;
     console.log('[Cotas] Modo polling');
+  }).catch((err) => {
+    console.error('[Cotas] Error al arrancar polling:', err.message);
+    process.exit(1);
   });
 }
 
-process.once('SIGINT',  () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+function gracefulStop(signal) {
+  if (!isPollingActive) return;
+  try {
+    bot.stop(signal);
+  } catch (err) {
+    console.warn(`[Cotas] Error al detener bot (${signal}): ${err.message}`);
+  }
+}
+
+process.once('SIGINT',  () => gracefulStop('SIGINT'));
+process.once('SIGTERM', () => gracefulStop('SIGTERM'));

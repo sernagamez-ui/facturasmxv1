@@ -335,20 +335,32 @@ async function facturar7Eleven(ticket, fiscal, opts = {}) {
       { log, op: 'verifica_ticket' }
     );
 
-    if (tv?.status !== '0') {
+    const statusNorm = tv != null && tv.status !== undefined && tv.status !== null
+      ? String(tv.status).trim()
+      : '';
+
+    if (statusNorm !== '0') {
       const map = {
         '1': ['TICKET_USED', 'Este ticket ya fue facturado anteriormente.'],
         '2': ['TICKET_INVALID', 'Ticket no encontrado. Verifica el número.'],
         '3': ['TICKET_EXPIRED', 'Ticket vencido. Solo se puede facturar dentro del mes + 5 días.'],
       };
-      const [code, msg] = map[tv?.status] || ['TICKET_INVALID', tv?.mensajeValidacion || 'Ticket no facturable.'];
+      const [code, msg] = map[statusNorm] || ['TICKET_INVALID', tv?.mensajeValidacion || 'Ticket no facturable.'];
+      const portalSnippet = typeof tv === 'object' && tv !== null
+        ? JSON.stringify(tv).slice(0, 280)
+        : String(tv ?? '').slice(0, 280);
       log.warn('verifica_ticket_rechazado', {
         requestId,
-        portalStatus: String(tv?.status ?? ''),
+        portalStatus: statusNorm || '(missing)',
         mensajeValidacion: String(tv?.mensajeValidacion || '').slice(0, 120),
         ticket: maskTicket(noTicket),
       });
-      throw new FacturaError(code, msg, { meta: { portalStatus: tv?.status } });
+      throw new FacturaError(code, msg, {
+        meta: {
+          portalStatus: statusNorm || '(missing)',
+          portalSnippet,
+        },
+      });
     }
 
     const total = Number.parseFloat(tv.totalTicket);
@@ -464,8 +476,14 @@ function errorResponse(err) {
     error: err.message || 'Error desconocido.',
     retryable: !!err.retryable,
   };
-  if (err instanceof FacturaError && err.meta && err.meta.portalStatus !== undefined && err.meta.portalStatus !== null) {
-    out.portalStatus = String(err.meta.portalStatus);
+  const isFactura = err instanceof FacturaError || err?.name === 'FacturaError';
+  if (isFactura && err.meta) {
+    if (err.meta.portalStatus !== undefined && err.meta.portalStatus !== null) {
+      out.portalStatus = String(err.meta.portalStatus);
+    }
+    if (err.meta.portalSnippet) {
+      out.portalSnippet = err.meta.portalSnippet;
+    }
   }
   return out;
 }

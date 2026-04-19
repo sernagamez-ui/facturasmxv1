@@ -239,7 +239,8 @@ async function procesarFactura(ticketData, userData, phone) {
         );
         console.log(
           `[facturaRouter][7eleven] intento code=${intento.code || 'ok'} len=${candidate.length} ` +
-          `portalStatus=${intento.portalStatus || 'n/a'} ticket=***${candidate.slice(-6)}`
+          `portalStatus=${intento.portalStatus || 'n/a'} snippet=${(intento.portalSnippet || '').slice(0, 120)} ` +
+          `ticket=***${candidate.slice(-6)}`
         );
         if (intento.success) {
           ticketData.noTicket = candidate;
@@ -258,6 +259,7 @@ async function procesarFactura(ticketData, userData, phone) {
           error: r.error,
           errorCode: r.code || null,
           portalStatus: r.portalStatus || null,
+          portalSnippet: r.portalSnippet || null,
           userMessage: armarMensaje7ElevenError(r.error, r.code),
         };
       } else {
