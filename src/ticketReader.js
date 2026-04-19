@@ -83,6 +83,8 @@ async function completarNoTicket7Eleven(ticketData, base64, mimeType) {
   const current = String(ticketData?.noTicket || '').replace(/\D/g, '');
   const candidates = [];
   if (/^\d{30,40}$/.test(current)) candidates.push(current);
+  const barcodeCandidates = await leerCodigoBarras7Eleven(Buffer.from(base64, 'base64'));
+  candidates.push(...barcodeCandidates);
 
   try {
     const response = await client.messages.create({
@@ -127,6 +129,34 @@ async function completarNoTicket7Eleven(ticketData, base64, mimeType) {
   }
 
   return { ...ticketData, noTicketCandidates: [] };
+}
+
+async function leerCodigoBarras7Eleven(imageBuffer) {
+  try {
+    const { readBarcodesFromImageData } = require('zxing-wasm/reader');
+    const image = await Jimp.fromBuffer(imageBuffer);
+    const { data, width, height } = image.bitmap;
+    const imageData = { data: new Uint8ClampedArray(data), width, height };
+
+    const results = await readBarcodesFromImageData(imageData, {
+      formats: ['Code128', 'Code39', 'ITF', 'EAN13', 'UPCA'],
+      tryHarder: true,
+    });
+
+    if (!Array.isArray(results) || results.length === 0) return [];
+
+    const extracted = results
+      .map((r) => String(r?.text || '').replace(/\D/g, ''))
+      .filter((val) => /^\d{30,40}$/.test(val));
+
+    if (extracted.length > 0) {
+      console.log('[ticketReader] Barcode 7-Eleven detectado:', extracted[0]);
+    }
+    return extracted;
+  } catch (err) {
+    console.log('[ticketReader] Barcode 7-Eleven falló:', err.message);
+    return [];
+  }
 }
 
 // ─────────────────────────────────────────────

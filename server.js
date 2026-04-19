@@ -416,63 +416,22 @@ cron.schedule('0 9 1 * *', async () => {
 
 // ── Arrancar ──────────────────────────────────────────────────────────────────
 
-const PORT = Number(process.env.PORT || 3000);
-const WEBHOOK_URL = process.env.WEBHOOK_URL;
-const IS_RAILWAY = Boolean(process.env.RAILWAY_PROJECT_ID || process.env.RAILWAY_ENVIRONMENT_ID);
-let isPollingActive = false;
-
-// Health endpoint para Railway
-app.get('/health', (_req, res) => {
-  const dataDir = process.env.DATA_DIR || (IS_RAILWAY ? '/data' : path.join(__dirname, 'data'));
-  res.status(200).json({
-    ok: true,
-    ts: new Date().toISOString(),
-    mode: WEBHOOK_URL ? 'webhook' : (IS_RAILWAY ? 'webhook-auto' : 'polling'),
-    isRailway: IS_RAILWAY,
-    dataDir,
+if (process.env.WEBHOOK_URL) {
+  // Modo webhook (Railway / producción)
+  app.use(express.json());
+  app.use(bot.webhookCallback('/webhook'));
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, async () => {
+    await bot.telegram.setWebhook(`${process.env.WEBHOOK_URL}/webhook`);
+    console.log(`[Cotas] Modo webhook en puerto ${PORT} — ${new Date().toISOString()}`);
   });
-});
-
-async function startBot() {
-  // Si hay WEBHOOK_URL explícita, usarla
-  if (WEBHOOK_URL) {
-    app.use(express.json());
-    app.use(bot.webhookCallback('/webhook'));
-    app.listen(PORT, async () => {
-      await bot.telegram.setWebhook(`${WEBHOOK_URL}/webhook`);
-      console.log(`[Cotas] Modo webhook en puerto ${PORT} — ${new Date().toISOString()}`);
-    });
-    return;
-  }
-
-  // En Railway web service: no usar polling, mantener HTTP arriba para healthcheck
-  if (IS_RAILWAY) {
-    app.listen(PORT, () => {
-      console.log(`[Cotas] HTTP activo en puerto ${PORT} (sin WEBHOOK_URL). Configura WEBHOOK_URL para recibir updates.`);
-    });
-    return;
-  }
-
-  // Local/dev: polling
-  await bot.telegram.deleteWebhook({ drop_pending_updates: true });
-  await bot.launch();
-  isPollingActive = true;
-  console.log('[Cotas] Modo polling');
+} else {
+  // Modo polling (desarrollo local)
+  bot.telegram.deleteWebhook({ drop_pending_updates: true }).then(() => {
+    bot.launch();
+    console.log('[Cotas] Modo polling');
+  });
 }
 
-startBot().catch((err) => {
-  console.error('[Cotas] Error al arrancar:', err.message);
-  process.exit(1);
-});
-
-function gracefulStop(signal) {
-  if (!isPollingActive) return;
-  try {
-    bot.stop(signal);
-  } catch (err) {
-    console.warn(`[Cotas] Error al detener bot (${signal}): ${err.message}`);
-  }
-}
-
-process.once('SIGINT',  () => gracefulStop('SIGINT'));
-process.once('SIGTERM', () => gracefulStop('SIGTERM'));
+process.once('SIGINT',  () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));
