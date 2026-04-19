@@ -21,6 +21,19 @@ const { verificarUsoCfdi, generarBotonesUsoCfdi, guardarEstadoEsperandoUsoCfdi, 
 
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
 const app = express();
+const IS_RAILWAY = Boolean(process.env.RAILWAY_PROJECT_ID || process.env.RAILWAY_ENVIRONMENT_ID);
+
+// Health endpoint para validar modo y directorio de datos en runtime
+app.get('/health', (_req, res) => {
+  const dataDir = process.env.DATA_DIR || (IS_RAILWAY ? '/data' : './data');
+  res.status(200).json({
+    ok: true,
+    ts: new Date().toISOString(),
+    mode: process.env.WEBHOOK_URL ? 'webhook' : (IS_RAILWAY ? 'webhook-auto' : 'polling'),
+    isRailway: IS_RAILWAY,
+    dataDir,
+  });
+});
 
 // ── Admin routes ─────────────────────────────────────────────────────────────
 const adminRoutes = require('./src/adminRoutes');

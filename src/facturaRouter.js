@@ -159,20 +159,43 @@ async function procesarFactura(ticketData, userData, phone) {
     } else if (comercio === '7eleven' || comercio === 'sieveEleven') {
       validar(ticketData, ['noTicket'], '7-Eleven');
 
-      const r = await facturar7Eleven(
-        { noTicket: ticketData.noTicket },
-        {
-          rfc:     userData.rfc,
-          nombre:  userData.nombre,
-          cp:      userData.cp,
-          regimen: userData.regimen,
-          email:   userData.email,
-          usoCFDI: comercioUsoCFDI(comercio, userData),
+      const candidates = [...new Set([
+        ticketData.noTicket,
+        ...(ticketData.noTicketCandidates || []),
+      ].map((v) => String(v || '').replace(/\D/g, '')).filter((v) => /^\d{30,40}$/.test(v)))];
+
+      let r = null;
+      for (const candidate of candidates) {
+        const intento = await facturar7Eleven(
+          { noTicket: candidate },
+          {
+            rfc:     userData.rfc,
+            nombre:  userData.nombre,
+            cp:      userData.cp,
+            regimen: userData.regimen,
+            email:   userData.email,
+            usoCFDI: comercioUsoCFDI(comercio, userData),
+          }
+        );
+        console.log(`[facturaRouter][7eleven] intento code=${intento.code || 'ok'} ticket=***${candidate.slice(-6)}`);
+        if (intento.success) {
+          ticketData.noTicket = candidate;
+          r = intento;
+          break;
         }
-      );
+        r = intento;
+        if (intento.code !== 'TICKET_INVALID' && intento.code !== 'INVALID_INPUT') {
+          break;
+        }
+      }
 
       if (!r.success) {
-        resultado = { ok: false, error: r.error, userMessage: armarMensaje7ElevenError(r.error) };
+        resultado = {
+          ok: false,
+          error: r.error,
+          errorCode: r.code || null,
+          userMessage: armarMensaje7ElevenError(r.error),
+        };
       } else {
         // Escribir PDF y XML a archivos
         const fs = require('fs');

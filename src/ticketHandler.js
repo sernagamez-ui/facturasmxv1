@@ -71,7 +71,10 @@ async function handleTicket(ctx, fileId, userData) {
   const resultado = await procesarFactura(ticketData, userData, phone, outputDir);
 
   // ── 5b. Si el portal necesita datos manuales, guardar estado de retry ─────
-  console.log(`[ticketHandler] resultado.esperandoDatosAlsea=${resultado.esperandoDatosAlsea} resultado.error=${resultado.error}`);
+  console.log(
+    `[ticketHandler] resultado.esperandoDatosAlsea=${resultado.esperandoDatosAlsea} ` +
+    `resultado.errorCode=${resultado.errorCode || 'n/a'} resultado.error=${resultado.error}`
+  );
   if (resultado.esperandoDatosAlsea) {
     const retryState = {
       step: 'ESPERANDO_DATOS_ALSEA',
