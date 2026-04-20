@@ -11,8 +11,9 @@ const { facturarOxxoTienda }   = require('./portales/oxxoTienda');
 const { generarFacturaHEB }    = require('./portales/heb');
 const { facturarAlsea }        = require('./portales/alsea');
 const { facturar7Eleven }     = require('./portales/7eleven');
+const { facturarOrigonCdc, ORIGON_CDC_CONFIG } = require('./portales/origonCdc');
 const { mensajeDeducibilidad, calcularDeducibilidadGasolina } = require('./deducibilidad');
-const { ALSEA_OPERADOR_MAP, ALSEA_BRANDS } = require('./ticketReader');
+const { ALSEA_OPERADOR_MAP, ALSEA_BRANDS, ORIGON_CDC_BRANDS } = require('./ticketReader');
 const db = require('./db');
 
 // Cola simple para OXXO Gas (sesión compartida — una a la vez)
@@ -299,6 +300,36 @@ async function procesarFactura(ticketData, userData, phone) {
         if (!ticketData.total && r.total) ticketData.total = r.total;
       }
 
+    // ── Grupo Galería (Origon CDC): Carl's Jr., IHOP, BWW, etc. ───────────
+    } else if (ORIGON_CDC_BRANDS.has(comercio)) {
+      const branchCode = ticketData.branchCode ?? ticketData.tienda;
+      const td = { ...ticketData, branchCode };
+      validar(td, ['branchCode', 'noTicket', 'fecha', 'total'], ORIGON_CDC_CONFIG[comercio]?.label || comercio);
+
+      resultado = await facturarOrigonCdc({
+        comercio,
+        branchCode: String(td.branchCode).trim(),
+        noTicket: String(td.noTicket).trim(),
+        fecha: td.fecha,
+        total: Number(td.total),
+        userData,
+        outputDir,
+      });
+
+      if (!resultado.ok) {
+        const errMap = {
+          ticket_invalido: '📋 El portal no reconoce este ticket. Verifica sucursal, folio, fecha y total (deben coincidir con el ticket).',
+          preview_error: '⚠️ Los datos fiscales o el ticket no pasaron la validación del portal.',
+          emision_error: '⚠️ No se pudo timbrar el CFDI. Intenta de nuevo en unos minutos.',
+          portal_forbidden:
+            '🚫 El portal de facturación bloqueó la conexión desde el servidor (403). Si usas hosting en la nube, puede hacer falta proxy en México o ejecutar Cotas en red local.',
+          proxy_auth:
+            '🔐 El proxy respondió 407. Revisa usuario y contraseña en PROXY_URL_ROTATING.',
+        };
+        resultado.userMessage =
+          errMap[resultado.error] || `⚠️ ${resultado.mensaje || resultado.error || 'Error al facturar'}`;
+      }
+
     // ── No soportado ────────────────────────────────────────────────────
     } else {
       return {
@@ -345,6 +376,9 @@ function armarMensajeExito(resultado, ticketData, userData, comercio) {
     italiannis: "Italianni's", vips: 'VIPS', popeyes: 'Popeyes',
     cheesecake: 'The Cheesecake Factory', elporton: 'El Portón', peiwei: 'Pei Wei',
     alsea: ticketData.operador || 'Alsea',
+    carlsjr: ORIGON_CDC_CONFIG.carlsjr?.label || "Carl's Jr.",
+    ihop: ORIGON_CDC_CONFIG.ihop?.label || 'IHOP',
+    bww: ORIGON_CDC_CONFIG.bww?.label || 'Buffalo Wild Wings',
   };
   const nombre = nombres[comercio] || comercio;
 
@@ -376,7 +410,10 @@ function armarMensajeError(error, comercio) {
     starbucks: 'Starbucks', dominos: "Domino's", burgerking: 'Burger King',
     chilis: "Chili's", cpk: 'California Pizza Kitchen', pfchangs: "P.F. Chang's",
     italiannis: "Italianni's", vips: 'VIPS', popeyes: 'Popeyes',
-    cheesecake: 'The Cheesecake Factory', elporton: 'El Portón', peiwei: 'Pei Wei',
+    cheesecake: 'The Cheesecake Factory',     elporton: 'El Portón', peiwei: 'Pei Wei',
+    carlsjr: ORIGON_CDC_CONFIG.carlsjr?.label || "Carl's Jr.",
+    ihop: ORIGON_CDC_CONFIG.ihop?.label || 'IHOP',
+    bww: ORIGON_CDC_CONFIG.bww?.label || 'Buffalo Wild Wings',
   };
   const nombre = nombres[comercio] || comercio;
 
@@ -420,14 +457,24 @@ function armarMensaje7ElevenError(error, errorCode) {
       '_Sin eso, la facturación automática de 7-Eleven desde la nube no es confiable._'
     );
   }
-  if (errorCode === 'TICKET_INVALID' || error.includes('Ticket no facturable') || error.includes('no encontrado')) {
+  if (
+    errorCode === 'TICKET_INVALID' ||
+    error.includes('Ticket no facturable') ||
+    error.includes('no encontrado') ||
+    /no exist/i.test(String(error))
+  ) {
+    const detalle =
+      errorCode === 'TICKET_INVALID' && String(error).length > 15
+        ? `\n\n📋 *Portal:* ${String(error).replace(/\*/g, '').slice(0, 240)}`
+        : '';
     return (
       '🔍 *7-Eleven no reconoce este folio.*\n\n' +
       'Lo más frecuente es que el número largo del código de barras se haya leído mal (un solo dígito mal ya invalida el ticket) o que el portal aún no lo tenga registrado.\n\n' +
       'Prueba:\n' +
       '• Foto más nítida con el código de barras *completo* y el número impreso debajo legible\n' +
-      '• Compara con el portal manual si el folio coincide\n' +
-      '• Si acabas de pagar, reintenta en unos minutos'
+      '• Compara el número con el portal manual (debe coincidir con la línea bajo el código de barras)\n' +
+      '• Si acabas de pagar, reintenta en unos minutos' +
+      detalle
     );
   }
   if (error.includes('ya fue facturado'))   return '📋 Este ticket de 7-Eleven ya fue facturado anteriormente.';

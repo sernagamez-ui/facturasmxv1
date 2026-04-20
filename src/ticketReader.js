@@ -13,6 +13,8 @@ const MODEL        = 'claude-haiku-4-5-20251001';  // Default: rápido y barato
 const MODEL_SONNET = 'claude-sonnet-4-6';           // Alsea: sin QR, dígitos deben ser exactos
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
+const { ORIGON_CDC_BRANDS } = require('./portales/origonCdc');
+
 /**
  * Lee un ticket desde un buffer de imagen.
  * Para OXXO Gas: intenta leer el QR primero (más rápido y preciso).
@@ -46,7 +48,7 @@ async function leerTicket(imageBuffer, mimeType = 'image/jpeg') {
   // Alsea y 7-Eleven: dígitos deben ser exactos → Sonnet (más preciso)
   // Otros: Haiku es suficiente (tienen QR o campos más tolerantes)
   const modelToUse =
-    ALSEA_BRANDS.has(comercio) || comercio === '7eleven' || comercio === 'oxxo'
+    ALSEA_BRANDS.has(comercio) || ORIGON_CDC_BRANDS.has(comercio) || comercio === '7eleven' || comercio === 'oxxo'
       ? MODEL_SONNET
       : MODEL;
 
@@ -82,6 +84,27 @@ async function leerTicket(imageBuffer, mimeType = 'image/jpeg') {
   }
 }
 
+/** Extrae el primer objeto JSON `{...}` cuando el modelo añade texto después del JSON. */
+function parseFirstJsonObject(text) {
+  const cleaned = String(text || '').trim().replace(/```json|```/g, '').trim();
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    const start = cleaned.indexOf('{');
+    if (start === -1) throw new Error('sin objeto JSON');
+    let depth = 0;
+    for (let i = start; i < cleaned.length; i++) {
+      const ch = cleaned[i];
+      if (ch === '{') depth++;
+      else if (ch === '}') {
+        depth--;
+        if (depth === 0) return JSON.parse(cleaned.slice(start, i + 1));
+      }
+    }
+    throw new Error('JSON truncado');
+  }
+}
+
 async function completarNoTicket7Eleven(ticketData, base64, mimeType) {
   const current = String(ticketData?.noTicket || '').replace(/\D/g, '');
   const candidates = [];
@@ -109,8 +132,8 @@ async function completarNoTicket7Eleven(ticketData, base64, mimeType) {
       }],
     });
 
-    const raw = response.content[0].text.trim().replace(/```json|```/g, '').trim();
-    const parsed = JSON.parse(raw);
+    const raw = response.content[0].text.trim();
+    const parsed = parseFirstJsonObject(raw);
     const noTicket = String(parsed?.noTicket || '').replace(/\D/g, '');
     if (/^\d{30,40}$/.test(noTicket)) candidates.push(noTicket);
     if (Array.isArray(parsed?.candidatos)) {
@@ -374,6 +397,40 @@ const ALSEA_OPERADOR_MAP = {
 
 const ALSEA_BRANDS = new Set(Object.keys(ALSEA_OPERADOR_MAP));
 
+/** Tickets Grupo Galería (Origon CDC): sucursal + folio + fecha + total (HAR carlsjr.cdc.origon.cloud). */
+function promptOrigonCdc(marcaKey) {
+  const labels = { carlsjr: "Carl's Jr.", ihop: 'IHOP', bww: 'Buffalo Wild Wings' };
+  const nombreMarca = labels[marcaKey] || marcaKey;
+  const anioActual = new Date().getFullYear();
+
+  return `Analiza este ticket de ${nombreMarca} (Grupo Galería) y extrae los datos para facturar electrónicamente.
+
+Suele existir una sección "Datos para facturar" o similar con:
+- Sucursal / sucursal / branch (número corto, a veces 2–4 dígitos)
+- Ticket / folio / número de ticket
+- Fecha de compra
+- Total pagado
+
+CAMPOS EN JSON (obligatorios):
+{
+  "encontrado": true,
+  "comercio": "${marcaKey}",
+  "branchCode": "código de sucursal SOLO dígitos como string (ej. \\"15\\") — busca 'Sucursal', 'Suc', 'Branch'",
+  "noTicket": "número de ticket o folio para facturación (dígitos; si hay letras, cópialas tal cual)",
+  "fecha": "YYYY-MM-DD",
+  "total": número decimal (total a pagar con IVA, el que pide el portal),
+  "metodoPago": "efectivo" o "tarjeta" o null
+}
+
+REGLAS:
+- branchCode y noTicket NO son intercambiables. La sucursal es el número CORTO de tienda; el ticket es el folio largo/distinto.
+- Lee cada dígito con cuidado (3 vs 8, 1 vs 7, 6 vs 5).
+- Si la fecha viene DD/MM/AAAA o DD-MM-AAAA, convierte a YYYY-MM-DD. Año actual ${anioActual}.
+- total: monto FINAL de la compra (con IVA), no subtotal.
+
+Responde SOLO con el JSON, sin texto adicional.`;
+}
+
 async function detectarComercio(base64, mimeType) {
   const response = await client.messages.create({
     model: MODEL,
@@ -402,6 +459,9 @@ popeyes
 cheesecake
 elporton
 peiwei
+carlsjr
+ihop
+bww
 general
 
 REGLAS:
@@ -422,6 +482,9 @@ REGLAS:
 - Si ves "THE CHEESECAKE FACTORY" -> responde: cheesecake
 - Si ves "EL PORTÓN" -> responde: elporton
 - Si ves "PEI WEI" -> responde: peiwei
+- Si ves "CARL'S JR", "CARLS JR", "Carls Junior" -> responde: carlsjr
+- Si ves "IHOP", "I HOP", International House of Pancakes -> responde: ihop
+- Si ves "BUFFALO WILD WINGS", "BWW" (restaurante), alitas -> responde: bww
 - Cualquier otro comercio -> responde: general`,
         },
       ],
@@ -432,6 +495,7 @@ REGLAS:
   const valid = [
     'petro7', 'oxxogas', 'oxxo', '7eleven', 'heb',
     ...ALSEA_BRANDS,
+    ...ORIGON_CDC_BRANDS,
     'general',
   ];
   return valid.includes(val) ? val : 'general';
@@ -439,6 +503,7 @@ REGLAS:
 
 function elegirPrompt(comercio) {
   if (ALSEA_BRANDS.has(comercio)) return promptAlsea(comercio);
+  if (ORIGON_CDC_BRANDS.has(comercio)) return promptOrigonCdc(comercio);
 
   switch (comercio) {
     case 'petro7':  return promptPetro7();
@@ -732,4 +797,4 @@ REGLAS:
 - Responde SOLO con el JSON, sin texto adicional.`;
 }
 
-module.exports = { leerTicket, ALSEA_OPERADOR_MAP, ALSEA_BRANDS };
+module.exports = { leerTicket, ALSEA_OPERADOR_MAP, ALSEA_BRANDS, ORIGON_CDC_BRANDS };
