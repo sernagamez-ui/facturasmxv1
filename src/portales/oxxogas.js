@@ -6,6 +6,7 @@ const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
 const { resolveDataDir } = require('../dataDir');
+const { getPlaywrightProxy } = require('../proxyAgent');
 
 const PORTAL_URL = 'https://facturacion.oxxogas.com';
 const DATA_DIR = resolveDataDir();
@@ -16,9 +17,11 @@ async function facturarOxxoGas({ estacion, noTicket, monto, userData, esEfectivo
     return { ok: false, error: 'No hay sesión guardada. Corre: node save-session.js' };
   }
 
+  const proxy = getPlaywrightProxy();
   const browser = await chromium.launch({
     headless: true,
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+    ...(proxy ? { proxy } : {}),
   });
   const context = await browser.newContext({ storageState: SESSION_FILE });
   const page = await context.newPage();

@@ -19,6 +19,7 @@
 'use strict';
 
 const axios = require('axios');
+const { getProxyAgent } = require('../proxyAgent');
 
 // ============================================================
 // CONFIG (env vars con defaults)
@@ -206,11 +207,13 @@ async function withRetry(fn, { retries = CFG.HTTP_RETRIES, baseMs = 400, log, op
 function crearSesion(signal) {
   const cookies = {};
   const proxy = proxyAxiosDesdeEnv();
+  const httpsAgent = getProxyAgent('rotating');
   const session = axios.create({
     baseURL: CFG.BASE,
     timeout: CFG.TIMEOUT_MS,
     signal,
     ...(proxy ? { proxy } : {}),
+    ...(httpsAgent ? { httpsAgent } : {}),
     headers: {
       Accept: 'application/json, text/plain, */*',
       Authorization: CFG.AUTH,
@@ -258,6 +261,7 @@ async function resolverCaptchaVision(imgBuffer, log) {
     throw new FacturaError('CAPTCHA_FAILED', 'Servicio de captcha temporalmente no disponible.', { retryable: true });
   }
   try {
+    const httpsAgent = getProxyAgent('rotating');
     const resp = await axios.post(
       'https://api.anthropic.com/v1/messages',
       {
@@ -278,6 +282,7 @@ async function resolverCaptchaVision(imgBuffer, log) {
           'content-type': 'application/json',
         },
         timeout: CFG.ANTHROPIC_TIMEOUT_MS,
+        ...(httpsAgent ? { httpsAgent } : {}),
       }
     );
     visionBreaker.ok();
