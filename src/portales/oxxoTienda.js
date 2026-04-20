@@ -10,6 +10,21 @@ const { getPlaywrightProxyOxxoTienda } = require('../proxyAgent');
 const PORTAL_URL =
   'https://www4.oxxo.com:9443/facturacionElectronica-web/views/layout/inicio.do';
 
+const FOLIO_SEL = '[id="form:folio"], input[name="form:folio"]';
+
+function isRailwayHost() {
+  return Boolean(process.env.RAILWAY_PROJECT_ID || process.env.RAILWAY_ENVIRONMENT_ID);
+}
+
+/** Mensaje corto si el formulario no aparece (IP / WAF). */
+function hintOxxoTiendaInfra() {
+  if (!isRailwayHost()) return '';
+  return (
+    ' En servidores como Railway la IP suele ser extranjera y OXXO tienda (:9443) no muestra el formulario. ' +
+    'Opciones: correr el bot en tu PC o un VPS en México; o probar OXXO_TIENDA_USE_PLAYWRIGHT_PROXY=1 si tu proxy permite el puerto 9443 (p. ej. SOCKS).'
+  );
+}
+
 function fechaIsoADmy(fecha) {
   if (!fecha) return null;
   const s = String(fecha).trim();
@@ -88,9 +103,13 @@ async function facturarOxxoTienda({ fecha, folio, venta, total, userData, output
 
   try {
     console.log('[OxxoTienda] Abriendo portal...');
-    await page.goto(PORTAL_URL, { waitUntil: 'networkidle', timeout: 120_000 });
-    const folioSel = '[id="form:folio"], input[name="form:folio"]';
-    await page.locator(folioSel).first().waitFor({ state: 'visible', timeout: 60_000 });
+    const res = await page.goto(PORTAL_URL, { waitUntil: 'load', timeout: 120_000 });
+    console.log('[OxxoTienda] HTTP', res?.status(), 'URL:', page.url());
+    // JSF/PrimeFaces: dar tiempo al render (networkidle en nube a veces no aplica o tarda distinto)
+    await page.waitForTimeout(3000);
+    const folioLoc = page.locator(FOLIO_SEL).first();
+    await folioLoc.waitFor({ state: 'attached', timeout: 45_000 });
+    await folioLoc.waitFor({ state: 'visible', timeout: 90_000 });
 
     const fechaEl = page.locator('[id="form:fecha_input"]');
     try {
@@ -105,7 +124,7 @@ async function facturarOxxoTienda({ fecha, folio, venta, total, userData, output
         el.dispatchEvent(new Event('blur', { bubbles: true }));
       }, fechaDmy);
     }
-    await page.locator(folioSel).first().fill(folioStr);
+    await folioLoc.fill(folioStr);
     await page.locator('[id="form:venta"]').fill(ventaStr);
     await page.locator('[id="form:total"]').fill(totalStr);
 
@@ -186,7 +205,17 @@ async function facturarOxxoTienda({ fecha, folio, venta, total, userData, output
     return { ok: true, pdfPath, xmlPath, uuid, envioPorCorreo: false };
   } catch (err) {
     console.error('[OxxoTienda] ❌', err.message);
-    return { ok: false, error: err.message };
+    let preview = '';
+    try {
+      preview = (await page.innerText('body').catch(() => '')).replace(/\s+/g, ' ').trim().slice(0, 500);
+      if (preview) console.error('[OxxoTienda] vista previa body:', preview);
+    } catch (_) {}
+    const suffix = hintOxxoTiendaInfra();
+    const errOut =
+      preview && (err.message || '').includes('Timeout')
+        ? `${err.message} — fragmento página: ${preview.slice(0, 280)}`
+        : err.message;
+    return { ok: false, error: errOut + suffix };
   } finally {
     await browser.close();
   }

@@ -48,6 +48,23 @@ function esCuerpoHtmlPortal(data) {
   return t.startsWith('<!') || t.startsWith('<html') || t.includes('403 forbidden') || t.includes('401 unauthorized');
 }
 
+/** Debug Railway/proxy: status + cuerpo recortado (sin loguear noTicket completo aquí). */
+function log7ElevenResponsePreview(etapa, resp) {
+  if (!resp) {
+    console.log(`[7Eleven] ${etapa} sin respuesta`);
+    return;
+  }
+  let dataPreview;
+  try {
+    const d = resp.data;
+    dataPreview = typeof d === 'string' ? d.slice(0, 500) : (JSON.stringify(d) || '').slice(0, 500);
+  } catch {
+    dataPreview = String(resp.data).slice(0, 500);
+  }
+  console.log(`[7Eleven] ${etapa} Response status:`, resp.status);
+  console.log(`[7Eleven] ${etapa} Response data:`, dataPreview);
+}
+
 /** Proxy HTTP(S) opcional (datacenters suelen recibir 403 del WAF de 7-Eleven). */
 function proxyAxiosDesdeEnv() {
   const raw = process.env.SEVENELEVEN_HTTP_PROXY || process.env.SEVENELEVEN_PROXY || '';
@@ -55,12 +72,15 @@ function proxyAxiosDesdeEnv() {
   try {
     const u = new URL(raw.trim());
     const port = u.port ? parseInt(u.port, 10) : (u.protocol === 'https:' ? 443 : 80);
-    const auth = u.username
-      ? {
-        username: decodeURIComponent(u.username),
-        password: decodeURIComponent(u.password || ''),
-      }
-      : undefined;
+    const userEnv = (process.env.SEVENELEVEN_PROXY_USER || '').trim();
+    const passEnv = process.env.SEVENELEVEN_PROXY_PASS || '';
+    let auth;
+    if (u.username || userEnv) {
+      auth = {
+        username: userEnv || decodeURIComponent(u.username || ''),
+        password: passEnv !== '' ? passEnv : decodeURIComponent(u.password || ''),
+      };
+    }
     return { protocol: u.protocol.replace(':', ''), host: u.hostname, port, auth };
   } catch {
     return undefined;
@@ -363,12 +383,24 @@ async function facturar7Eleven(ticket, fiscal, opts = {}) {
     '7-Eleven respondió 403 (bloqueo). Desde servidores en la nube (p. ej. Railway) el portal suele rechazar la IP. ' +
     'Opciones: configurar `SEVENELEVEN_HTTP_PROXY` con un proxy residencial en México, o ejecutar Cotas en tu PC/red local.';
 
+  const msgProxy407 =
+    'El proxy respondió 407 (autenticación requerida). Revisa usuario y contraseña del proxy: ' +
+    'en la URL `http://USUARIO:CONTRASEÑA@host:puerto` (caracteres especiales URL-encoded), ' +
+    'o define `SEVENELEVEN_PROXY_USER` y `SEVENELEVEN_PROXY_PASS` en Railway. ' +
+    'Si no usas proxy, quita `SEVENELEVEN_HTTP_PROXY` y variables `HTTP_PROXY`/`HTTPS_PROXY` del servicio.';
+
   try {
     // 1. Init session
     const initResp = await withRetry(
       () => session.get('/facturacion/KPortalExterno/', { headers: { Accept: 'text/html' } }),
       { log, op: 'init_session' }
     );
+    if (initResp.status === 407) {
+      throw new FacturaError('PROXY_AUTH_REQUIRED', msgProxy407, {
+        retryable: false,
+        meta: { httpStatus: 407, op: 'init_session' },
+      });
+    }
     if ([401, 403, 429].includes(initResp.status)) {
       throw new FacturaError('PORTAL_FORBIDDEN', msgPortal403, {
         retryable: false,
@@ -381,14 +413,21 @@ async function facturar7Eleven(ticket, fiscal, opts = {}) {
       () => session.get(`${API}/FacturacionService/verificaTicketWS2`, { params: { noTicket } }),
       { log, op: 'verifica_ticket' }
     );
-    const tv = verificaResp.data;
 
+    if (verificaResp.status === 407) {
+      throw new FacturaError('PROXY_AUTH_REQUIRED', msgProxy407, {
+        retryable: false,
+        meta: { httpStatus: 407, op: 'verifica_ticket' },
+      });
+    }
     if ([401, 403, 429].includes(verificaResp.status)) {
       throw new FacturaError('PORTAL_FORBIDDEN', msgPortal403, {
         retryable: false,
         meta: { httpStatus: verificaResp.status, op: 'verifica_ticket' },
       });
     }
+
+    const tv = verificaResp.data;
     if (typeof tv === 'string' && esCuerpoHtmlPortal(tv)) {
       throw new FacturaError('PORTAL_FORBIDDEN', msgPortal403, {
         retryable: false,
@@ -400,6 +439,7 @@ async function facturar7Eleven(ticket, fiscal, opts = {}) {
       });
     }
     if (tv == null || typeof tv !== 'object' || Array.isArray(tv)) {
+      log7ElevenResponsePreview('verificaTicketWS2', verificaResp);
       throw new FacturaError(
         'PORTAL_DOWN',
         'Respuesta inesperada del portal de 7-Eleven al validar el ticket.',

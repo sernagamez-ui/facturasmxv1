@@ -402,6 +402,15 @@ function comercioUsoCFDI(comercio, userData) {
 
 function armarMensaje7ElevenError(error, errorCode) {
   if (!error) return '⚠️ Error desconocido al facturar en 7-Eleven.';
+  if (errorCode === 'PROXY_AUTH_REQUIRED' || error.includes('407')) {
+    return (
+      '🔐 *El proxy pide autenticación (HTTP 407).*\n\n' +
+      'Revisa en Railway:\n' +
+      '• `SEVENELEVEN_HTTP_PROXY` con formato `http://usuario:contraseña@host:puerto` (contraseña con caracteres especiales en *URL encode*)\n' +
+      '• O proxy sin credenciales en la URL + variables `SEVENELEVEN_PROXY_USER` y `SEVENELEVEN_PROXY_PASS`\n\n' +
+      'Si *no* quieres usar proxy, borra `SEVENELEVEN_HTTP_PROXY` y también `HTTP_PROXY` / `HTTPS_PROXY` del servicio (a veces Railway o la plantilla las define y provocan 407).'
+    );
+  }
   if (errorCode === 'PORTAL_FORBIDDEN' || error.includes('403') || error.includes('bloqueo')) {
     return (
       '🚫 *7-Eleven bloqueó la conexión desde este servidor (403).*\n\n' +
