@@ -289,12 +289,15 @@ async function facturarPetro7({ gasolinera, folio, webId, fecha, userData, outpu
     console.error('[Petro7] Error descargando XML:', err.message);
   }
 
+  const totalTicket = v.total != null && v.total !== '' ? Number(v.total) : undefined;
+
   return {
     ok:             true,
     uuid:           cfdi.uuid,
     pdfPath,
     xmlPath,
     envioPorCorreo: !pdfPath && !xmlPath,
+    total:          Number.isFinite(totalTicket) ? totalTicket : undefined,
   };
   } catch (err) {
     const mapped = mapPetro7HttpError(err);

@@ -85,6 +85,7 @@ function setState(id, s) {
 
 function guardarFactura(id, fac) {
   const data = { ...fac, guardadoEn: new Date().toISOString() };
+  console.log('[guardarFactura] payload:', JSON.stringify(data, null, 2));
   stmts.addFactura.run(normalizeId(id), JSON.stringify(data), data.guardadoEn);
 }
 function getFacturasMes(id, monthKey) {

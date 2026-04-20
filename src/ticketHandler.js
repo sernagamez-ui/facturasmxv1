@@ -16,8 +16,7 @@ const nodemailer = require('nodemailer');
 
 const { leerTicket }                                      = require('./ticketReader');
 const { procesarFactura }                                 = require('./facturaRouter');
-const { calcularDeducibilidadGasolina }                   = require('./deducibilidad');
-const { clasificarGasto }                                 = require('./fiscalRules');
+const { clasificarGasto, calcularDeducibilidad }          = require('./fiscalRules');
 const db                                                  = require('./db');
 const { ORIGON_CDC_CONFIG }                               = require('./portales/origonCdc');
 
@@ -189,24 +188,35 @@ async function handleRetryAlsea(userId, texto, userData) {
 // ── Guardar en historial ──────────────────────────────────────────────────────
 
 function _guardarEnHistorial(userId, ticketData, resultado, userData) {
-  const montoTotal = Number(ticketData.total || ticketData.monto || 0);
-  const deduccion  = calcularDeducibilidadGasolina(
-    montoTotal,
-    ticketData.metodoPago || 'tarjeta',
-    userData.regimen
-  );
+  const rawTotal =
+    ticketData.total ?? ticketData.monto ?? resultado?.total ?? resultado?.monto;
+  const montoTotal = Number(rawTotal) || 0;
+  const metodoPago =
+    ticketData.esEfectivo || ticketData.metodoPago === 'efectivo' ? 'efectivo' : 'tarjeta';
+  const deduccion = calcularDeducibilidad({
+    comercio: ticketData.comercio,
+    total: montoTotal,
+    regimen: userData.regimen,
+    metodoPago,
+    usoCfdi: ticketData.usoCfdi || userData.usoCFDI || userData.usoCfdi,
+  });
+  const montoDeducible = Number(deduccion.montoDeducible) || 0;
+  const ivaAcreditable = Number(deduccion.ivaAcreditable) || 0;
   db.guardarFactura(userId, {
+    portal:         ticketData.comercio,
     comercio:       ticketData.comercio,
+    monto:          montoTotal,
     total:          montoTotal,
-    montoDeducible: deduccion.montoDeducible || 0,
-    ivaAcreditable: deduccion.ivaAcreditable || 0,
+    deducibleISR:   montoDeducible,
+    montoDeducible,
+    ivaAcreditable,
     deducible:      deduccion.deducible,
-    metodoPago:     ticketData.metodoPago || 'tarjeta',
+    metodoPago:     ticketData.metodoPago || metodoPago,
     tipoGasolina:   ticketData.tipoGasolina || null,
     litros:         ticketData.litros || null,
-    fecha:          ticketData.fecha || null,
+    fecha:          ticketData.fecha || ticketData.fechaTicket || null,
     regimen:        userData.regimen,
-    uuid:           resultado.uuid   || null,
+    uuid:           resultado.uuid || null,
     folioFiscal:    resultado.folioFiscal || null,
   });
 }
