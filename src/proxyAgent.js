@@ -98,15 +98,28 @@ function getPlaywrightProxy(tipo = 'sticky') {
 
 /**
  * Proxy Playwright solo para OXXO tienda (https://…:9443/).
- * Muchos proxies residenciales rechazan CONNECT a puertos distintos de 443 → ERR_TUNNEL_CONNECTION_FAILED.
- * Por defecto no se usa proxy aquí. Activa OXXO_TIENDA_USE_PLAYWRIGHT_PROXY=1 si tu proveedor permite el puerto.
+ * Usa PROXY_URL_SOCKS5 cuando OXXO_TIENDA_USE_PLAYWRIGHT_PROXY=1.
  * @returns {object|undefined}
  */
 function getPlaywrightProxyOxxoTienda() {
   if (String(process.env.OXXO_TIENDA_USE_PLAYWRIGHT_PROXY || '').trim() !== '1') {
     return undefined;
   }
-  return getPlaywrightProxy();
+
+  const url = process.env.PROXY_URL_SOCKS5;
+  if (!url) return undefined;
+
+  try {
+    const parsed = new URL(url);
+    return {
+      server: `socks5://${parsed.hostname}:${parsed.port}`,
+      username: parsed.username,
+      password: decodeURIComponent(parsed.password),
+    };
+  } catch (_) {
+    console.warn('[proxyAgent] PROXY_URL_SOCKS5 inválida:', url);
+    return undefined;
+  }
 }
 
 const { SocksProxyAgent } = require('socks-proxy-agent');
