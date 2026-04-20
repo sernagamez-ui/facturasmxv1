@@ -209,8 +209,8 @@ function crearSesion(signal) {
     baseURL: CFG.BASE,
     timeout: CFG.TIMEOUT_MS,
     signal,
-    proxy: false,
-    ...(httpsAgent ? { httpAgent: httpsAgent, httpsAgent } : {}),
+    proxy: false, // evita que HTTP_PROXY / HTTPS_PROXY del sistema anulen httpsAgent
+    ...(httpsAgent ? { httpsAgent, httpAgent: httpsAgent } : {}),
     headers: {
       Accept: 'application/json, text/plain, */*',
       Authorization: CFG.AUTH,
