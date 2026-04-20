@@ -72,7 +72,7 @@ async function handleTicket(ctx, fileId, userData) {
 
   // ── 5. Llamar al facturaRouter existente ──────────────────────────────────
   // procesarFactura() ya maneja petro7 y oxxogas y retorna { ok, pdfPath, xmlPath, userMessage }
-  const phone = userData.telegramId; // para el outputDir interno de facturaRouter
+  const phone = userData.telegramId || userId; // TelegramId en onboarding; fallback por usuarios viejos
   const resultado = await procesarFactura(ticketData, userData, phone, outputDir);
 
   // ── 5b. Si el portal necesita datos manuales, guardar estado de retry ─────
@@ -96,8 +96,10 @@ async function handleTicket(ctx, fileId, userData) {
   }
 
   // ── 6. Guardar factura en historial ───────────────────────────────────────
+  let totalParaUi = null;
   if (resultado.ok) {
     _guardarEnHistorial(userId, ticketData, resultado, userData);
+    totalParaUi = ticketData.total ?? ticketData.monto ?? null;
   }
 
   // ── 7. Construir mensaje de respuesta ────────────────────────────────────
@@ -111,6 +113,7 @@ async function handleTicket(ctx, fileId, userData) {
     pdfPath: resultado.pdfPath || null,
     xmlPath: resultado.xmlPath || null,
     ok: !!resultado.ok,
+    totalParaUi,
   };
 }
 
@@ -187,10 +190,39 @@ async function handleRetryAlsea(userId, texto, userData) {
 
 // ── Guardar en historial ──────────────────────────────────────────────────────
 
-function _guardarEnHistorial(userId, ticketData, resultado, userData) {
-  const rawTotal =
+/** Total del comprobante en CFDI 3.3 / 4.0 (atributo Total del nodo Comprobante). */
+function leerTotalDesdeCfdiXml(xmlPath) {
+  try {
+    if (!xmlPath || !fs.existsSync(xmlPath)) return null;
+    const xml = fs.readFileSync(xmlPath, 'utf8');
+    const i = xml.indexOf('Comprobante');
+    if (i === -1) return null;
+    const head = xml.slice(i, i + 4000);
+    const m = head.match(/\bTotal="([0-9.]+)"/);
+    if (!m) return null;
+    const n = Number(m[1]);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+function resolverMontoFactura(ticketData, resultado) {
+  const raw =
     ticketData.total ?? ticketData.monto ?? resultado?.total ?? resultado?.monto;
-  const montoTotal = Number(rawTotal) || 0;
+  let n = Number(raw);
+  if (Number.isFinite(n) && n > 0) return n;
+  const desdeXml = resultado?.xmlPath ? leerTotalDesdeCfdiXml(resultado.xmlPath) : null;
+  if (desdeXml != null) return desdeXml;
+  return Number.isFinite(n) ? n : 0;
+}
+
+function _guardarEnHistorial(userId, ticketData, resultado, userData) {
+  const montoTotal = resolverMontoFactura(ticketData, resultado);
+  if (montoTotal > 0) {
+    if (ticketData.total == null || Number(ticketData.total) === 0) ticketData.total = montoTotal;
+    if (ticketData.monto == null || Number(ticketData.monto) === 0) ticketData.monto = montoTotal;
+  }
   const metodoPago =
     ticketData.esEfectivo || ticketData.metodoPago === 'efectivo' ? 'efectivo' : 'tarjeta';
   const deduccion = calcularDeducibilidad({

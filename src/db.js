@@ -35,6 +35,29 @@ function legacyId(id) {
   return String(id ?? '').trim();
 }
 
+/** Inicio del día 1 del mes en America/Mexico_City expresado en ISO (RMF / usuarios MX). Sin DST en la mayoría del país. */
+function mexicoMonthStartIsoUtc(year, month1to12) {
+  const h = 6; // UTC−06:00 (Tiempo del Centro)
+  return new Date(Date.UTC(year, month1to12 - 1, 1, h, 0, 0, 0)).toISOString();
+}
+
+function mexicoCalendarMonthFromDate(d = new Date()) {
+  const p = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Mexico_City',
+    year: 'numeric',
+    month: 'numeric',
+  }).formatToParts(d);
+  return {
+    year: Number(p.find((x) => x.type === 'year').value),
+    month: Number(p.find((x) => x.type === 'month').value),
+  };
+}
+
+function mexicoNextMonthYear(year, month1to12) {
+  if (month1to12 === 12) return { year: year + 1, month: 1 };
+  return { year, month: month1to12 + 1 };
+}
+
 db.exec(`
   CREATE TABLE IF NOT EXISTS users    (id TEXT PRIMARY KEY, data TEXT NOT NULL DEFAULT '{}');
   CREATE TABLE IF NOT EXISTS states   (id TEXT PRIMARY KEY, data TEXT NOT NULL DEFAULT '{}');
@@ -85,7 +108,6 @@ function setState(id, s) {
 
 function guardarFactura(id, fac) {
   const data = { ...fac, guardadoEn: new Date().toISOString() };
-  console.log('[guardarFactura] payload:', JSON.stringify(data, null, 2));
   stmts.addFactura.run(normalizeId(id), JSON.stringify(data), data.guardadoEn);
 }
 function getFacturasMes(id, monthKey) {
@@ -93,12 +115,14 @@ function getFacturasMes(id, monthKey) {
   let e;
   if (typeof monthKey === 'string' && /^\d{4}-\d{2}$/.test(monthKey)) {
     const [year, month] = monthKey.split('-').map(Number);
-    s = new Date(year, month - 1, 1).toISOString();
-    e = new Date(year, month, 1).toISOString();
+    s = mexicoMonthStartIsoUtc(year, month);
+    const next = mexicoNextMonthYear(year, month);
+    e = mexicoMonthStartIsoUtc(next.year, next.month);
   } else {
-    const now = new Date();
-    s = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
-    e = new Date(now.getFullYear(), now.getMonth() + 1, 1).toISOString();
+    const { year, month } = mexicoCalendarMonthFromDate(new Date());
+    s = mexicoMonthStartIsoUtc(year, month);
+    const next = mexicoNextMonthYear(year, month);
+    e = mexicoMonthStartIsoUtc(next.year, next.month);
   }
   const key = normalizeId(id);
   const legacy = legacyId(id);
@@ -111,11 +135,11 @@ function getFacturasMes(id, monthKey) {
   return rows.map(r => JSON.parse(r.data));
 }
 function getFacturasMesAnteriorTodos() {
-  const now = new Date();
-  const m = now.getMonth() === 0 ? 11 : now.getMonth() - 1;
-  const y = now.getMonth() === 0 ? now.getFullYear() - 1 : now.getFullYear();
-  const s = new Date(y, m, 1).toISOString();
-  const e = new Date(y, m + 1, 1).toISOString();
+  const { year, month } = mexicoCalendarMonthFromDate(new Date());
+  const prev = month === 1 ? { y: year - 1, m: 12 } : { y: year, m: month - 1 };
+  const s = mexicoMonthStartIsoUtc(prev.y, prev.m);
+  const afterPrev = mexicoNextMonthYear(prev.y, prev.m);
+  const e = mexicoMonthStartIsoUtc(afterPrev.year, afterPrev.month);
   const rows = stmts.getAllFactMes.all(s, e);
   const res = {};
   for (const r of rows) { if (!res[r.user_id]) res[r.user_id] = []; res[r.user_id].push(JSON.parse(r.data)); }

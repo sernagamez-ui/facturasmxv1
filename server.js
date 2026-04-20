@@ -323,7 +323,7 @@ async function _enviarResultado(chatId, resultado, ticketData, userData, usoCfdi
     let msg = resultado.mensajeBot || '✅ Factura procesada.';
 
     // Agregar info fiscal (solo éxito; en error el texto puede traer URLs/puertos que rompen Markdown)
-    const total = ticketData.total || ticketData.monto;
+    const total = resultado.totalParaUi ?? ticketData.total ?? ticketData.monto;
     if (resultado.ok === true && total && userData.regimen) {
       const fiscal = mensajeFiscal({
         comercio:   ticketData.comercio,
@@ -370,7 +370,7 @@ async function handleMisFacturas(ctx) {
     totalIva       += Number(f.ivaAcreditable || 0);
   });
 
-  const mes     = new Date().toLocaleString('es-MX', { month: 'long' });
+  const mes     = new Date().toLocaleString('es-MX', { month: 'long', timeZone: 'America/Mexico_City' });
   const regimen = user?.regimen || '';
   const deduceRegs = ['612','626','601','603','620','622','623','624','625'];
 
