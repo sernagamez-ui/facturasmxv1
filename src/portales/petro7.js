@@ -7,7 +7,21 @@ const qs    = require('querystring');
 const fs    = require('fs');
 const path  = require('path');
 
+const { getProxyAgent } = require('../proxyAgent');
+
 const BASE_URL = 'https://tarjetapetro-7.com.mx/KJServices/webapi';
+
+/** Misma idea que 7-Eleven: WAF suele devolver 403 a IPs de datacenter (Railway) sin proxy MX. */
+function petro7Http(extra = {}) {
+  const agent = getProxyAgent('rotating');
+  if (!agent) return extra;
+  return {
+    ...extra,
+    httpsAgent: agent,
+    httpAgent: agent,
+    proxy: false,
+  };
+}
 
 // Credencial estática hardcodeada en kportalexterno.js del portal
 // Decodificado: kextwebapi:kli0ts0us02ws3rbr0k0wtm1c
@@ -30,7 +44,7 @@ const HEADERS = {
 async function verificarTicket({ estacion, noTicket, fechaTicket, webId }) {
   const res = await axios.get(
     `${BASE_URL}/FacturacionService/verificaTicketWS2`,
-    { headers: HEADERS, params: { estacion, fechaTicket, noTicket, webId } }
+    petro7Http({ headers: HEADERS, params: { estacion, fechaTicket, noTicket, webId } })
   );
   const d = res.data;
   return {
@@ -80,7 +94,7 @@ async function generarFactura(ticket, receptor) {
   const res = await axios.post(
     `${BASE_URL}/FacturaExpressService`,
     qs.stringify(body),
-    { headers: { ...HEADERS, 'content-type': 'application/x-www-form-urlencoded' } }
+    petro7Http({ headers: { ...HEADERS, 'content-type': 'application/x-www-form-urlencoded' } })
   );
 
   const r = res.data[0];
@@ -98,10 +112,10 @@ async function generarFactura(ticket, receptor) {
 async function descargarPdf(uuid, rfc, outputDir) {
   const res = await axios.get(
     `${BASE_URL}/FacturaExpressService/descargaCfdiPdf`,
-    {
+    petro7Http({
       headers: HEADERS,
       params: { uuid, rfc, branding: 'petro' },
-    }
+    })
   );
 
   const d = res.data;
@@ -124,10 +138,10 @@ async function descargarPdf(uuid, rfc, outputDir) {
 async function descargarXml(uuid, email, outputDir) {
   const res = await axios.get(
     `${BASE_URL}/FacturaExpressService/descargaCfdiXml`,
-    {
+    petro7Http({
       headers: HEADERS,
       params: { uuid, email },
-    }
+    })
   );
 
   const d = res.data;
@@ -158,10 +172,41 @@ function formatearFecha(fechaStr) {
   return `${yyyy}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')}T06:00:00.000Z`;
 }
 
+function mapPetro7HttpError(err) {
+  const status = err.response?.status;
+  if (status === 407) {
+    return {
+      ok: false,
+      error: 'proxy_auth',
+      userMessage:
+        '🔐 *El proxy pide autenticación (HTTP 407).*\n\n' +
+        'Revisa en Railway la variable `PROXY_URL_ROTATING`: formato `http://usuario:contraseña@host:puerto` ' +
+        '(contraseña con caracteres especiales en *URL encode*).',
+    };
+  }
+  if (status === 403 || status === 401) {
+    return {
+      ok: false,
+      error: 'portal_forbidden',
+      userMessage:
+        '🚫 *Petro 7 rechazó la conexión desde el servidor (bloqueo por IP).*\n\n' +
+        'No es un error de tu ticket: el portal suele bloquear IPs de datacenters (Railway, etc.).\n\n' +
+        '*Qué hacer:* define `PROXY_URL_ROTATING` con un proxy HTTP residencial en México (mismo criterio que 7-Eleven; ver `src/proxyAgent.js`).\n\n' +
+        '_Sin eso, la facturación automática desde la nube puede fallar._',
+    };
+  }
+  return null;
+}
+
 // ─────────────────────────────────────────────
 // ORQUESTADOR — llamado desde facturaRouter.js
 // ─────────────────────────────────────────────
 async function facturarPetro7({ gasolinera, folio, webId, fecha, userData, outputDir }) {
+  if (getProxyAgent('rotating')) {
+    console.log('[Petro7] peticiones vía PROXY_URL_ROTATING');
+  }
+
+  try {
   const fechaFormateada = formatearFecha(fecha);
 
   const ticket = {
@@ -233,12 +278,14 @@ async function facturarPetro7({ gasolinera, folio, webId, fecha, userData, outpu
   try {
     pdfPath = await descargarPdf(cfdi.uuid, userData.rfc, outputDir);
   } catch (err) {
+    if (mapPetro7HttpError(err)) throw err;
     console.error('[Petro7] Error descargando PDF:', err.message);
   }
 
   try {
     xmlPath = await descargarXml(cfdi.uuid, userData.email, outputDir);
   } catch (err) {
+    if (mapPetro7HttpError(err)) throw err;
     console.error('[Petro7] Error descargando XML:', err.message);
   }
 
@@ -249,6 +296,11 @@ async function facturarPetro7({ gasolinera, folio, webId, fecha, userData, outpu
     xmlPath,
     envioPorCorreo: !pdfPath && !xmlPath,
   };
+  } catch (err) {
+    const mapped = mapPetro7HttpError(err);
+    if (mapped) return mapped;
+    throw err;
+  }
 }
 
 module.exports = { facturarPetro7, verificarTicket, generarFactura, formatearFecha };

@@ -4,12 +4,16 @@
  */
 
 require('dotenv').config();
+const axios = require('axios');
+axios.get('https://api.ipify.org?format=json')
+  .then(r => console.log('[Railway] IP pública de salida:', r.data.ip))
+  .catch(e => console.log('[Railway] No pude obtener IP:', e.message));
+
 const { Telegraf, Markup } = require('telegraf');
 const express = require('express');
 const fs      = require('fs');
 const path    = require('path');
 const os      = require('os');
-const axios   = require('axios');
 const cron    = require('node-cron');
 
 const db                                = require('./src/db');
