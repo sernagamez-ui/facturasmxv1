@@ -405,10 +405,9 @@ function armarMensaje7ElevenError(error, errorCode) {
   if (errorCode === 'PROXY_AUTH_REQUIRED' || error.includes('407')) {
     return (
       '🔐 *El proxy pide autenticación (HTTP 407).*\n\n' +
-      'Revisa en Railway:\n' +
-      '• `SEVENELEVEN_HTTP_PROXY` con formato `http://usuario:contraseña@host:puerto` (contraseña con caracteres especiales en *URL encode*)\n' +
-      '• O proxy sin credenciales en la URL + variables `SEVENELEVEN_PROXY_USER` y `SEVENELEVEN_PROXY_PASS`\n\n' +
-      'Si *no* quieres usar proxy, borra `SEVENELEVEN_HTTP_PROXY` y también `HTTP_PROXY` / `HTTPS_PROXY` del servicio (a veces Railway o la plantilla las define y provocan 407).'
+      'Revisa en Railway la variable `PROXY_URL_ROTATING`:\n' +
+      '• Formato `http(s)://usuario:contraseña@host:puerto` (contraseña con caracteres especiales en *URL encode*)\n\n' +
+      'Si no usas proxy, borra `PROXY_URL_ROTATING` y revisa `HTTP_PROXY` / `HTTPS_PROXY` del servicio (a veces provocan 407).'
     );
   }
   if (errorCode === 'PORTAL_FORBIDDEN' || error.includes('403') || error.includes('bloqueo')) {
@@ -416,7 +415,7 @@ function armarMensaje7ElevenError(error, errorCode) {
       '🚫 *7-Eleven bloqueó la conexión desde este servidor (403).*\n\n' +
       'No es un error de tu ticket: el portal suele rechazar IPs de datacenters (Railway, etc.).\n\n' +
       '*Qué puedes hacer:*\n' +
-      '• Configura en Railway la variable `SEVENELEVEN_HTTP_PROXY` con un proxy HTTP residencial en México\n' +
+      '• Define `PROXY_URL_ROTATING` con un proxy HTTP residencial en México (ver `src/proxyAgent.js`)\n' +
       '• O corre Cotas en tu máquina local / red de casa (misma IP que usarías en el navegador)\n\n' +
       '_Sin eso, la facturación automática de 7-Eleven desde la nube no es confiable._'
     );

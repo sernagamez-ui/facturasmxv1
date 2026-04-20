@@ -65,28 +65,6 @@ function log7ElevenResponsePreview(etapa, resp) {
   console.log(`[7Eleven] ${etapa} Response data:`, dataPreview);
 }
 
-/** Proxy HTTP(S) opcional (datacenters suelen recibir 403 del WAF de 7-Eleven). */
-function proxyAxiosDesdeEnv() {
-  const raw = process.env.SEVENELEVEN_HTTP_PROXY || process.env.SEVENELEVEN_PROXY || '';
-  if (!raw.trim()) return undefined;
-  try {
-    const u = new URL(raw.trim());
-    const port = u.port ? parseInt(u.port, 10) : (u.protocol === 'https:' ? 443 : 80);
-    const userEnv = (process.env.SEVENELEVEN_PROXY_USER || '').trim();
-    const passEnv = process.env.SEVENELEVEN_PROXY_PASS || '';
-    let auth;
-    if (u.username || userEnv) {
-      auth = {
-        username: userEnv || decodeURIComponent(u.username || ''),
-        password: passEnv !== '' ? passEnv : decodeURIComponent(u.password || ''),
-      };
-    }
-    return { protocol: u.protocol.replace(':', ''), host: u.hostname, port, auth };
-  } catch {
-    return undefined;
-  }
-}
-
 // ============================================================
 // ERRORES TIPADOS (la queue decide retry vs dead-letter)
 // ============================================================
@@ -226,14 +204,13 @@ async function withRetry(fn, { retries = CFG.HTTP_RETRIES, baseMs = 400, log, op
 // ============================================================
 function crearSesion(signal) {
   const cookies = {};
-  const proxy = proxyAxiosDesdeEnv();
   const httpsAgent = getProxyAgent('rotating');
   const session = axios.create({
     baseURL: CFG.BASE,
     timeout: CFG.TIMEOUT_MS,
     signal,
-    ...(proxy ? { proxy } : {}),
-    ...(httpsAgent ? { httpsAgent } : {}),
+    proxy: false,
+    ...(httpsAgent ? { httpAgent: httpsAgent, httpsAgent } : {}),
     headers: {
       Accept: 'application/json, text/plain, */*',
       Authorization: CFG.AUTH,
@@ -381,13 +358,12 @@ async function facturar7Eleven(ticket, fiscal, opts = {}) {
 
   const msgPortal403 =
     '7-Eleven respondió 403 (bloqueo). Desde servidores en la nube (p. ej. Railway) el portal suele rechazar la IP. ' +
-    'Opciones: configurar `SEVENELEVEN_HTTP_PROXY` con un proxy residencial en México, o ejecutar Cotas en tu PC/red local.';
+    'Opciones: definir `PROXY_URL_ROTATING` (proxy residencial en México, ver `src/proxyAgent.js`) o ejecutar Cotas en tu PC/red local.';
 
   const msgProxy407 =
-    'El proxy respondió 407 (autenticación requerida). Revisa usuario y contraseña del proxy: ' +
-    'en la URL `http://USUARIO:CONTRASEÑA@host:puerto` (caracteres especiales URL-encoded), ' +
-    'o define `SEVENELEVEN_PROXY_USER` y `SEVENELEVEN_PROXY_PASS` en Railway. ' +
-    'Si no usas proxy, quita `SEVENELEVEN_HTTP_PROXY` y variables `HTTP_PROXY`/`HTTPS_PROXY` del servicio.';
+    'El proxy respondió 407 (autenticación requerida). Revisa usuario y contraseña en `PROXY_URL_ROTATING` ' +
+    '(formato `http(s)://USUARIO:CONTRASEÑA@host:puerto`, contraseña URL-encoded si lleva caracteres especiales). ' +
+    'Si no usas proxy, borra `PROXY_URL_ROTATING` y revisa que no queden `HTTP_PROXY`/`HTTPS_PROXY` en el servicio.';
 
   try {
     // 1. Init session
