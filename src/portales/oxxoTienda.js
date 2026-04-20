@@ -1,9 +1,11 @@
 // src/portales/oxxoTienda.js — Facturación tienda OXXO (conveniencia)
 // Portal JSF + PrimeFaces: https://www4.oxxo.com:9443/facturacionElectronica-web/
+// Playwright: por defecto sin proxy (puerto 9443 + residencial suele romper el túnel). Ver getPlaywrightProxyOxxoTienda.
 
 const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
+const { getPlaywrightProxyOxxoTienda } = require('../proxyAgent');
 
 const PORTAL_URL =
   'https://www4.oxxo.com:9443/facturacionElectronica-web/views/layout/inicio.do';
@@ -62,9 +64,19 @@ async function facturarOxxoTienda({ fecha, folio, venta, total, userData, output
   const totalStr = Number(total).toFixed(2);
   const usoCode = getUsoCfdi(userData.regimen, userData.usoCFDI || userData.usoCfdi);
 
+  const proxy = getPlaywrightProxyOxxoTienda();
+  const hayProxyEnEnv =
+    String(process.env.PROXY_URL_STICKY || '').trim() ||
+    String(process.env.PROXY_URL_ROTATING || '').trim();
+  if (!proxy && hayProxyEnEnv && String(process.env.OXXO_TIENDA_USE_PLAYWRIGHT_PROXY || '').trim() !== '1') {
+    console.log(
+      '[OxxoTienda] Playwright sin proxy (9443 + proxy residencial suele dar ERR_TUNNEL). OXXO_TIENDA_USE_PLAYWRIGHT_PROXY=1 para forzar.'
+    );
+  }
   const browser = await chromium.launch({
     headless: true,
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+    ...(proxy ? { proxy } : {}),
   });
 
   const context = await browser.newContext({
@@ -76,8 +88,9 @@ async function facturarOxxoTienda({ fecha, folio, venta, total, userData, output
 
   try {
     console.log('[OxxoTienda] Abriendo portal...');
-    await page.goto(PORTAL_URL, { waitUntil: 'domcontentloaded', timeout: 90_000 });
-    await page.locator('[id="form:folio"]').waitFor({ state: 'visible', timeout: 45_000 });
+    await page.goto(PORTAL_URL, { waitUntil: 'networkidle', timeout: 120_000 });
+    const folioSel = '[id="form:folio"], input[name="form:folio"]';
+    await page.locator(folioSel).first().waitFor({ state: 'visible', timeout: 60_000 });
 
     const fechaEl = page.locator('[id="form:fecha_input"]');
     try {
@@ -92,7 +105,7 @@ async function facturarOxxoTienda({ fecha, folio, venta, total, userData, output
         el.dispatchEvent(new Event('blur', { bubbles: true }));
       }, fechaDmy);
     }
-    await page.locator('[id="form:folio"]').fill(folioStr);
+    await page.locator(folioSel).first().fill(folioStr);
     await page.locator('[id="form:venta"]').fill(ventaStr);
     await page.locator('[id="form:total"]').fill(totalStr);
 
