@@ -19,6 +19,7 @@ const { procesarFactura }                                 = require('./facturaRo
 const { calcularDeducibilidadGasolina }                   = require('./deducibilidad');
 const { clasificarGasto }                                 = require('./fiscalRules');
 const db                                                  = require('./db');
+const { ORIGON_CDC_CONFIG }                               = require('./portales/origonCdc');
 
 /**
  * Procesa una foto de ticket recibida por Telegram
@@ -243,6 +244,7 @@ async function enviarXmlPorEmail(email, xmlPath, uuid) {
 // ── Helpers de mensaje ────────────────────────────────────────────────────────
 
 function _nombreComercio(comercio) {
+  if (ORIGON_CDC_CONFIG[comercio]) return ORIGON_CDC_CONFIG[comercio].label;
   const nombres = {
     petro7: 'Petro 7', oxxogas: 'OXXO Gas', oxxo: 'OXXO',
     orsan: 'Orsan', mobil_nl: 'Mobil NL', pemex: 'Pemex',
@@ -250,6 +252,7 @@ function _nombreComercio(comercio) {
     chilis: "Chili's", cpk: 'California Pizza Kitchen', pfchangs: "P.F. Chang's",
     italiannis: "Italianni's", vips: 'VIPS', popeyes: 'Popeyes',
     cheesecake: 'The Cheesecake Factory', elporton: 'El Portón', heb: 'HEB',
+    mcdonalds: "McDonald's", '7eleven': '7-Eleven',
   };
   return nombres[comercio] || comercio;
 }

@@ -6,7 +6,7 @@ const wa      = require('./whatsapp');
 const db      = require('./db');
 const { setEstacionId } = db;
 const { leerTicket }          = require('./ticketReader');
-const { procesarFactura }     = require('./facturaRouter');
+const { procesarFactura, comercioFacturableAutomatico, etiquetaComercio } = require('./facturaRouter');
 const { registrarArchivos, urlArchivo } = require('./fileServer');
 
 // RFC persona física: 4 letras + 6 dígitos + 3 alfanum = 13 chars
@@ -308,22 +308,19 @@ async function procesarTicket(phone, imageBuffer, mimeType) {
     return;
   }
 
-  if (!['petro7', 'oxxogas', 'oxxo'].includes(ticketData.comercio)) {
+  if (!comercioFacturableAutomatico(ticketData.comercio)) {
     await wa.sendText(phone,
       `ℹ️ Detecté un ticket de *${ticketData.comercio || 'este comercio'}*.\n\n` +
-      `Por ahora solo facturo automáticamente:\n• ⛽ Petro 7\n• ⛽ OXXO Gas\n• 🏪 OXXO (tienda)\n\n` +
-      `Próximamente más establecimientos.`
+      `Ese comercio aún no tiene facturación automática en Cotas por este canal.\n\n` +
+      `Soportados: Petro 7, OXXO Gas, OXXO tienda, HEB, 7-Eleven, marcas Alsea, Carl's Jr. / IHOP / BWW (Grupo Galería), McDonald's, etc.`
     );
     return;
   }
 
-  const nombreComercio =
-    ticketData.comercio === 'petro7'
-      ? 'Petro 7'
-      : ticketData.comercio === 'oxxo'
-        ? 'OXXO'
-        : 'OXXO Gas';
-  await wa.sendText(phone, `⏳ Tramitando tu factura de *${nombreComercio}*... (puede tardar ~1 minuto)`);
+  await wa.sendText(
+    phone,
+    `⏳ Tramitando tu factura de *${etiquetaComercio(ticketData.comercio)}*... (puede tardar ~1 minuto)`
+  );
 
   const resultado = await procesarFactura(ticketData, user, phone);
 

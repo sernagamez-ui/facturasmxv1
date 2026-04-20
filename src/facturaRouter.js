@@ -12,6 +12,7 @@ const { generarFacturaHEB }    = require('./portales/heb');
 const { facturarAlsea }        = require('./portales/alsea');
 const { facturar7Eleven }     = require('./portales/7eleven');
 const { facturarOrigonCdc, ORIGON_CDC_CONFIG } = require('./portales/origonCdc');
+const { facturarMcDonalds } = require('./portales/mcdonalds');
 const { mensajeDeducibilidad, calcularDeducibilidadGasolina } = require('./deducibilidad');
 const { ALSEA_OPERADOR_MAP, ALSEA_BRANDS, ORIGON_CDC_BRANDS } = require('./ticketReader');
 const db = require('./db');
@@ -330,6 +331,41 @@ async function procesarFactura(ticketData, userData, phone) {
           errMap[resultado.error] || `⚠️ ${resultado.mensaje || resultado.error || 'Error al facturar'}`;
       }
 
+    // ── McDonald's México ────────────────────────────────────────────────
+    } else if (comercio === 'mcdonalds') {
+      const td = {
+        number_store: ticketData.number_store ?? ticketData.numberStore,
+        num_ticket: ticketData.num_ticket ?? ticketData.noTicket,
+        num_caja: ticketData.num_caja ?? ticketData.caja,
+        fecha: ticketData.fecha,
+        total: ticketData.total,
+      };
+      validar(td, ['number_store', 'num_ticket', 'num_caja', 'fecha', 'total'], "McDonald's");
+
+      resultado = await facturarMcDonalds({
+        number_store: String(td.number_store).trim(),
+        num_ticket: String(td.num_ticket).trim(),
+        num_caja: String(td.num_caja).trim(),
+        fecha: td.fecha,
+        total: Number(td.total),
+        userData,
+        outputDir,
+      });
+
+      if (!resultado.ok) {
+        const errMap = {
+          ya_facturado: '📋 Este ticket de McDonald\'s ya fue facturado.',
+          ticket_invalido:
+            '🔍 El portal no reconoce el ticket. Verifica tienda, número de ticket, caja, fecha y total (deben coincidir con el ticket).',
+          datos_fiscales: '⚠️ Faltan RFC, régimen fiscal o código postal para facturar en McDonald\'s.',
+          portal_forbidden:
+            '🚫 El portal bloqueó la conexión (403). Desde la nube puede hacer falta proxy en México o ejecutar Cotas en red local.',
+          proxy_auth: '🔐 El proxy respondió 407. Revisa credenciales en PROXY_URL_ROTATING.',
+        };
+        resultado.userMessage =
+          errMap[resultado.error] || `⚠️ ${resultado.mensaje || resultado.error || 'Error al facturar'}`;
+      }
+
     // ── No soportado ────────────────────────────────────────────────────
     } else {
       return {
@@ -379,6 +415,7 @@ function armarMensajeExito(resultado, ticketData, userData, comercio) {
     carlsjr: ORIGON_CDC_CONFIG.carlsjr?.label || "Carl's Jr.",
     ihop: ORIGON_CDC_CONFIG.ihop?.label || 'IHOP',
     bww: ORIGON_CDC_CONFIG.bww?.label || 'Buffalo Wild Wings',
+    mcdonalds: 'McDonald\'s',
   };
   const nombre = nombres[comercio] || comercio;
 
@@ -414,6 +451,7 @@ function armarMensajeError(error, comercio) {
     carlsjr: ORIGON_CDC_CONFIG.carlsjr?.label || "Carl's Jr.",
     ihop: ORIGON_CDC_CONFIG.ihop?.label || 'IHOP',
     bww: ORIGON_CDC_CONFIG.bww?.label || 'Buffalo Wild Wings',
+    mcdonalds: 'McDonald\'s',
   };
   const nombre = nombres[comercio] || comercio;
 
@@ -487,4 +525,32 @@ function armarMensaje7ElevenError(error, errorCode) {
   return `⚠️ No se pudo facturar en 7-Eleven: ${error}`;
 }
 
-module.exports = { procesarFactura };
+/** Comercios con adaptador HTTP/Playwright en `procesarFactura` (p. ej. WhatsApp debe permitirlos). */
+function comercioFacturableAutomatico(comercio) {
+  if (!comercio) return false;
+  if (comercio === 'alsea') return true;
+  if (ALSEA_BRANDS.has(comercio)) return true;
+  if (ORIGON_CDC_BRANDS.has(comercio)) return true;
+  return ['petro7', 'oxxogas', 'oxxo', 'heb', '7eleven', 'sieveEleven', 'mcdonalds'].includes(comercio);
+}
+
+function etiquetaComercio(comercio) {
+  if (!comercio) return 'este comercio';
+  const origon = ORIGON_CDC_CONFIG[comercio];
+  if (origon) return origon.label;
+  if (comercio === 'alsea') return 'Alsea';
+  const alseaOp = ALSEA_OPERADOR_MAP[comercio];
+  if (alseaOp) return alseaOp;
+  const n = {
+    petro7: 'Petro 7',
+    oxxogas: 'OXXO Gas',
+    oxxo: 'OXXO',
+    heb: 'HEB',
+    '7eleven': '7-Eleven',
+    sieveEleven: '7-Eleven',
+    mcdonalds: "McDonald's",
+  };
+  return n[comercio] || comercio;
+}
+
+module.exports = { procesarFactura, comercioFacturableAutomatico, etiquetaComercio };
