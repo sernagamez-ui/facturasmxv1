@@ -109,8 +109,17 @@ function getPlaywrightProxyOxxoTienda() {
   return getPlaywrightProxy();
 }
 
+const { SocksProxyAgent } = require('socks-proxy-agent');
+
+function getSocksAgent() {
+  const url = process.env.PROXY_URL_SOCKS5;
+  if (!url) return undefined;
+  return new SocksProxyAgent(url);
+}
+
 module.exports = {
   getProxyAgent,
   getPlaywrightProxy,
   getPlaywrightProxyOxxoTienda,
+  getSocksAgent,
 };
