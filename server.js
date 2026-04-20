@@ -148,7 +148,10 @@ bot.on('text', async (ctx) => {
     try {
       const resultado = await handleRetryAlsea(userId, texto, userData);
       await ctx.telegram.deleteMessage(ctx.chat.id, msg.message_id).catch(() => {});
-      await ctx.reply(resultado.mensajeBot, { parse_mode: 'Markdown' });
+      await ctx.reply(
+        resultado.mensajeBot,
+        resultado.ok === true ? { parse_mode: 'Markdown' } : {}
+      );
       if (resultado.pdfPath && fs.existsSync(resultado.pdfPath)) {
         await ctx.replyWithDocument({ source: resultado.pdfPath, filename: `factura_${Date.now()}.pdf` }, { caption: '📄 PDF' });
       }
@@ -315,9 +318,9 @@ async function _enviarResultado(chatId, resultado, ticketData, userData, usoCfdi
   try {
     let msg = resultado.mensajeBot || '✅ Factura procesada.';
 
-    // Agregar info fiscal
+    // Agregar info fiscal (solo éxito; en error el texto puede traer URLs/puertos que rompen Markdown)
     const total = ticketData.total || ticketData.monto;
-    if (total && userData.regimen) {
+    if (resultado.ok === true && total && userData.regimen) {
       const fiscal = mensajeFiscal({
         comercio:   ticketData.comercio,
         total,
@@ -328,7 +331,8 @@ async function _enviarResultado(chatId, resultado, ticketData, userData, usoCfdi
       msg += fiscal;
     }
 
-    await bot.telegram.sendMessage(chatId, msg, { parse_mode: 'Markdown' });
+    const sendOpts = resultado.ok === true ? { parse_mode: 'Markdown' } : {};
+    await bot.telegram.sendMessage(chatId, msg, sendOpts);
 
     if (resultado.pdfPath && fs.existsSync(resultado.pdfPath)) {
       await bot.telegram.sendDocument(chatId,

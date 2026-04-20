@@ -88,6 +88,9 @@ async function facturarOxxoTienda({ fecha, folio, venta, total, userData, output
       '[OxxoTienda] Playwright sin proxy (9443 + proxy residencial suele dar ERR_TUNNEL). OXXO_TIENDA_USE_PLAYWRIGHT_PROXY=1 para forzar.'
     );
   }
+  console.log('[OxxoTienda] proxy config:', JSON.stringify(proxy ?? null));
+  console.log('[OxxoTienda] OXXO_TIENDA_USE_PLAYWRIGHT_PROXY:', process.env.OXXO_TIENDA_USE_PLAYWRIGHT_PROXY);
+  console.log('[OxxoTienda] PROXY_URL_SOCKS5:', process.env.PROXY_URL_SOCKS5 ? 'SET' : 'NOT SET');
   const browser = await chromium.launch({
     headless: true,
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],

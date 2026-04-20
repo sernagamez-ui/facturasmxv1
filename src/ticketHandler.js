@@ -44,6 +44,7 @@ async function handleTicket(ctx, fileId, userData) {
     console.error('[ticketHandler] Error Vision:', err.message);
     return {
       mensajeBot: '❌ No pude leer el ticket. ¿Puedes enviar una foto más clara y bien iluminada?',
+      ok: false,
     };
   }
 
@@ -51,6 +52,7 @@ async function handleTicket(ctx, fileId, userData) {
     return {
       mensajeBot:
         '❓ No reconocí el tipo de ticket. Por ahora proceso: Petro 7, OXXO Gas, Orsan, Pemex, 🏪 OXXO tienda, Alsea y HEB.',
+      ok: false,
     };
   }
 
@@ -61,6 +63,7 @@ async function handleTicket(ctx, fileId, userData) {
         '⚠️ *Gasolina pagada en efectivo*\n\n' +
         'Los pagos en efectivo *no son deducibles* ante el SAT (Art. 27 LISR).\n\n' +
         'Para deducir, paga con tarjeta débito/crédito o transferencia. 💳',
+      ok: false,
     };
   }
 
@@ -107,6 +110,7 @@ async function handleTicket(ctx, fileId, userData) {
     mensajeBot,
     pdfPath: resultado.pdfPath || null,
     xmlPath: resultado.xmlPath || null,
+    ok: !!resultado.ok,
   };
 }
 
@@ -123,7 +127,7 @@ async function handleRetryAlsea(userId, texto, userData) {
   const state = db.getState(userId);
 
   if (!state || state.step !== 'ESPERANDO_DATOS_ALSEA' || !state.ticketData) {
-    return { mensajeBot: '❌ No hay un ticket pendiente. Mándame una nueva foto.' };
+    return { mensajeBot: '❌ No hay un ticket pendiente. Mándame una nueva foto.', ok: false };
   }
 
   // Parsear: "283991736 38742" o "283991736  38742" (espacios flexibles)
@@ -134,6 +138,7 @@ async function handleRetryAlsea(userId, texto, userData) {
         '❌ No entendí los datos. Escribe el número de *ticket* y *tienda* separados por un espacio.\n\n' +
         'Ejemplo: `283991736 38742`\n\n' +
         '_(El ticket tiene 9 dígitos y la tienda 5 dígitos — búscalos en la sección "Datos para facturar" de tu ticket)_',
+      ok: false,
     };
   }
 
@@ -175,6 +180,7 @@ async function handleRetryAlsea(userId, texto, userData) {
     mensajeBot,
     pdfPath: resultado.pdfPath || null,
     xmlPath: resultado.xmlPath || null,
+    ok: !!resultado.ok,
   };
 }
 
