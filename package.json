@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "node server.js",
     "start": "node server.js",
-    "smoke:oxxo": "node scripts/smoke-oxxo-portal.js"
+    "smoke:oxxo": "node scripts/smoke-oxxo-portal.js",
+    "smoke:mcdonalds": "node scripts/smoke-mcdonalds.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.24.0",

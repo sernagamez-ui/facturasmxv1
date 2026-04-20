@@ -48,7 +48,11 @@ async function leerTicket(imageBuffer, mimeType = 'image/jpeg') {
   // Alsea y 7-Eleven: dígitos deben ser exactos → Sonnet (más preciso)
   // Otros: Haiku es suficiente (tienen QR o campos más tolerantes)
   const modelToUse =
-    ALSEA_BRANDS.has(comercio) || ORIGON_CDC_BRANDS.has(comercio) || comercio === '7eleven' || comercio === 'oxxo'
+    ALSEA_BRANDS.has(comercio) ||
+    ORIGON_CDC_BRANDS.has(comercio) ||
+    comercio === '7eleven' ||
+    comercio === 'oxxo' ||
+    comercio === 'mcdonalds'
       ? MODEL_SONNET
       : MODEL;
 
@@ -462,6 +466,7 @@ peiwei
 carlsjr
 ihop
 bww
+mcdonalds
 general
 
 REGLAS:
@@ -485,6 +490,7 @@ REGLAS:
 - Si ves "CARL'S JR", "CARLS JR", "Carls Junior" -> responde: carlsjr
 - Si ves "IHOP", "I HOP", International House of Pancakes -> responde: ihop
 - Si ves "BUFFALO WILD WINGS", "BWW" (restaurante), alitas -> responde: bww
+- Si ves "MCDONALDS", "McDonald's", "MCDONALD'S", "RESTAURANTES ADMX", facturacionmcdonalds.com.mx -> responde: mcdonalds
 - Cualquier otro comercio -> responde: general`,
         },
       ],
@@ -496,6 +502,7 @@ REGLAS:
     'petro7', 'oxxogas', 'oxxo', '7eleven', 'heb',
     ...ALSEA_BRANDS,
     ...ORIGON_CDC_BRANDS,
+    'mcdonalds',
     'general',
   ];
   return valid.includes(val) ? val : 'general';
@@ -511,6 +518,7 @@ function elegirPrompt(comercio) {
     case 'oxxo':    return promptOxxoTienda();
     case 'heb':     return promptHEB();
     case '7eleven': return prompt7Eleven();
+    case 'mcdonalds': return promptMcDonalds();
     default:        return promptGeneral();
   }
 }
@@ -767,6 +775,44 @@ REGLAS CRÍTICAS:
 4. tienda: son los primeros 4 dígitos del noTicket. También aparece explícitamente como "TIENDA XXXX".
 
 5. fecha: formato de entrada puede ser DD/MM/YYYY. Convierte a YYYY-MM-DD.
+
+Responde SOLO con el JSON, sin texto adicional.`;
+}
+
+// ─────────────────────────────────────────────
+// PROMPT — McDonald's México (facturacionmcdonalds.com.mx)
+// ─────────────────────────────────────────────
+
+function promptMcDonalds() {
+  const anioActual = new Date().getFullYear();
+
+  return `Analiza este ticket de McDonald's México (RESTAURANTES ADMX u operador McDonald's) para el portal www.facturacionmcdonalds.com.mx.
+
+El portal pide estos datos (deben coincidir EXACTAMENTE con el ticket):
+- Número de tienda / restaurante (suele ser 4 dígitos cerca del nombre de la tienda, ej. "0807")
+- Nro. Ticket (número de ticket; a veces con ceros a la izquierda, ej. "000027206")
+- Caja o Reg. (número de caja / registro, ej. "01")
+- Fecha del ticket
+- Total a pagar (Total comedor / total con IVA, el que corresponde a la venta)
+
+CAMPOS EN JSON:
+{
+  "encontrado": true,
+  "comercio": "mcdonalds",
+  "number_store": "código de tienda solo dígitos (string), típicamente 4 dígitos con ceros a la izquierda si aplica",
+  "num_ticket": "número de ticket tal como en 'Nro. Ticket' o equivalente — incluye ceros iniciales si aparecen en el ticket",
+  "num_caja": "número de caja o 'Reg.' solo dígitos (string), ej. '01' o '76'",
+  "fecha": "YYYY-MM-DD",
+  "total": número decimal (total de la compra con IVA que debe facturarse),
+  "metodoPago": "efectivo" o "tarjeta" o null
+}
+
+REGLAS:
+- NO uses el número de pedido (#orden) como num_ticket; usa el valor de "Nro. Ticket" / folio de facturación.
+- NO uses el importe en efectivo ni el cambio como total; usa el total de la venta (ej. Total comedor c/IVA).
+- number_store NO es el número de empleado ni el # de pedido.
+- Lee dígitos con cuidado (0 vs O, 1 vs 7).
+- Si la fecha viene DD/MM/AAAA, convierte a YYYY-MM-DD. Año actual ${anioActual}.
 
 Responde SOLO con el JSON, sin texto adicional.`;
 }
