@@ -428,12 +428,46 @@ async function facturar7Eleven(ticket, fiscal, opts = {}) {
       : '';
 
     if (statusNorm !== '0') {
-      const map = {
-        '1': ['TICKET_USED', 'Este ticket ya fue facturado anteriormente.'],
-        '2': ['TICKET_INVALID', 'Ticket no encontrado. Verifica el número.'],
-        '3': ['TICKET_EXPIRED', 'Ticket vencido. Solo se puede facturar dentro del mes + 5 días.'],
-      };
-      const [code, msg] = map[statusNorm] || ['TICKET_INVALID', tv?.mensajeValidacion || 'Ticket no facturable.'];
+      const mvRaw = String(tv?.mensajeValidacion || '').trim();
+      const mvl = mvRaw.toLowerCase();
+
+      /** El WS a veces devuelve status numérico distinto del mensaje; priorizar texto del portal. */
+      let code;
+      let msg;
+      if (mvRaw.length > 0) {
+        if (
+          mvl.includes('no exist') ||
+          mvl.includes('no encontr') ||
+          mvl.includes('incorrect') ||
+          mvl.includes('no coincide') ||
+          mvl.includes('sin registro')
+        ) {
+          code = 'TICKET_INVALID';
+          msg = mvRaw.length > 200 ? `${mvRaw.slice(0, 200)}…` : mvRaw;
+        } else if (mvl.includes('vencid') || mvl.includes('plazo') || mvl.includes('5 días') || mvl.includes('5 dias')) {
+          code = 'TICKET_EXPIRED';
+          msg = mvRaw.length > 200 ? `${mvRaw.slice(0, 200)}…` : mvRaw;
+        } else if (
+          mvl.includes('ya fue factur') ||
+          mvl.includes('ya facturad') ||
+          (mvl.includes('facturad') && mvl.includes('anterior')) ||
+          mvl.includes('duplicad')
+        ) {
+          code = 'TICKET_USED';
+          msg = 'Este ticket ya fue facturado anteriormente.';
+        }
+      }
+
+      if (!code) {
+        const map = {
+          '1': ['TICKET_USED', 'Este ticket ya fue facturado anteriormente.'],
+          '2': ['TICKET_INVALID', 'Ticket no encontrado. Verifica el número.'],
+          '3': ['TICKET_EXPIRED', 'Ticket vencido. Solo se puede facturar dentro del mes + 5 días.'],
+        };
+        const pair = map[statusNorm] || ['TICKET_INVALID', mvRaw || tv?.mensajeValidacion || 'Ticket no facturable.'];
+        code = pair[0];
+        msg = pair[1];
+      }
       const portalSnippet = typeof tv === 'object' && tv !== null
         ? JSON.stringify(tv).slice(0, 280)
         : String(tv ?? '').slice(0, 280);
@@ -447,6 +481,7 @@ async function facturar7Eleven(ticket, fiscal, opts = {}) {
         meta: {
           portalStatus: statusNorm || '(missing)',
           portalSnippet,
+          mensajeValidacion: mvRaw.slice(0, 200),
         },
       });
     }
