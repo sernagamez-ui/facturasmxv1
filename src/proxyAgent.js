@@ -49,24 +49,51 @@ function getProxyAgent(tipo = 'rotating') {
 
 /**
  * Devuelve config de proxy para Playwright.
+ * Intenta PROXY_URL_STICKY / PROXY_URL_ROTATING; si el parse falla, usa
+ * PROXY_STICKY_HOST, PROXY_STICKY_PORT, PROXY_STICKY_USER, PROXY_STICKY_PASS.
  * @param {'rotating'|'sticky'} tipo
  * @returns {object|undefined}
  */
 function getPlaywrightProxy(tipo = 'sticky') {
-  const raw = tipo === 'sticky'
-    ? process.env.PROXY_URL_STICKY
-    : process.env.PROXY_URL_ROTATING;
+  const raw =
+    tipo === 'sticky'
+      ? process.env.PROXY_URL_STICKY
+      : process.env.PROXY_URL_ROTATING;
 
-  const url = parseProxyEnvUrl(raw, tipo === 'sticky' ? 'sticky' : 'rotating');
-  if (!url) return undefined;
+  const url = raw != null ? String(raw).trim() : '';
+  if (url) {
+    try {
+      const parsed = new URL(url);
+      if (!parsed.hostname) throw new Error('sin hostname');
+      const port = parsed.port || (parsed.protocol === 'https:' ? '443' : '80');
+      let password = parsed.password;
+      try {
+        password = decodeURIComponent(parsed.password);
+      } catch (_) {
+        password = parsed.password;
+      }
+      return {
+        server: `${parsed.protocol}//${parsed.hostname}:${port}`,
+        username: parsed.username,
+        password,
+      };
+    } catch (_) {}
+  }
 
-  const parsed = new URL(url);
-  const port = parsed.port || (parsed.protocol === 'https:' ? '443' : '80');
-  return {
-    server:   `${parsed.protocol}//${parsed.hostname}:${port}`,
-    username: parsed.username,
-    password: parsed.password,
-  };
+  const host = process.env.PROXY_STICKY_HOST;
+  const port = process.env.PROXY_STICKY_PORT;
+  const user = process.env.PROXY_STICKY_USER;
+  const pass = process.env.PROXY_STICKY_PASS;
+
+  if (host && port && user && pass != null && String(pass) !== '') {
+    return {
+      server: `http://${String(host).trim()}:${String(port).trim()}`,
+      username: String(user).trim(),
+      password: String(pass).trim(),
+    };
+  }
+
+  return undefined;
 }
 
 /**
