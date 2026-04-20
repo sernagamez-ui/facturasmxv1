@@ -99,25 +99,22 @@ function getPlaywrightProxy(tipo = 'sticky') {
 /**
  * Proxy Playwright solo para OXXO tienda (https://…:9443/).
  * Usa PROXY_URL_SOCKS5 cuando OXXO_TIENDA_USE_PLAYWRIGHT_PROXY=1.
+ * Sin username/password si el proveedor autentica por IP whitelist (p. ej. IPRoyal).
  * @returns {object|undefined}
  */
 function getPlaywrightProxyOxxoTienda() {
   if (String(process.env.OXXO_TIENDA_USE_PLAYWRIGHT_PROXY || '').trim() !== '1') {
     return undefined;
   }
-
   const url = process.env.PROXY_URL_SOCKS5;
   if (!url) return undefined;
-
   try {
     const parsed = new URL(url);
     return {
       server: `socks5://${parsed.hostname}:${parsed.port}`,
-      username: parsed.username,
-      password: decodeURIComponent(parsed.password),
+      // sin username ni password — IPRoyal autentica por IP whitelist
     };
   } catch (_) {
-    console.warn('[proxyAgent] PROXY_URL_SOCKS5 inválida:', url);
     return undefined;
   }
 }
