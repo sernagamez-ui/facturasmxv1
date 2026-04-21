@@ -32,12 +32,57 @@ async function _generarFacturaHEB(ticketData, userData) {
     const page = await context.newPage();
     const captured = {};
 
-    // ── Capturar respuestas auxiliares (no timbrar/consulta doc: se leen en waitForResponse) ──
+    /**
+     * El SPA puede llamar timbrar / emitir / otra ruta; no confiar en "timbrar" en la URL.
+     * Identificamos timbrado por JSON: result.success + list_facturas[] con comp_id o documento.
+     */
+    function jsonEsTimbradoExitoso(j) {
+      if (!Array.isArray(j?.list_facturas) || j.list_facturas.length === 0) return false;
+      if (j?.result?.success === false) return false;
+      const row = j.list_facturas[0];
+      const okRow = row.comp_id != null || !!(row.document && (row.document.xml || row.document.pdf));
+      if (!okRow) return false;
+      if (j?.result?.success === true) return true;
+      if (j?.result == null && okRow) return true;
+      return false;
+    }
+
     page.on('response', async (res) => {
       try {
         const url = res.url();
         if (!url.includes('/cli/api')) return;
-        if (url.includes('consulta_facturas_uuid')) captured.uuidData = await res.json();
+        const method = res.request().method();
+        if (method === 'GET' || method === 'HEAD') {
+          if (url.includes('consulta_facturas_uuid')) captured.uuidData = await res.json();
+          return;
+        }
+
+        // No fiar solo en Content-Type: algunos proxies devuelven JSON sin application/json
+        let j;
+        try {
+          j = await res.json();
+        } catch {
+          return;
+        }
+
+        const short = url.split('?')[0].split('/').slice(-3).join('/');
+        if (method !== 'GET') console.log('[HEB] API', method, short);
+
+        if (jsonEsTimbradoExitoso(j)) {
+          captured.timbrado = j;
+          console.log('[HEB] Timbrado capturado (forma JSON), comp_id:', j.list_facturas[0]?.comp_id);
+        } else if (j?.result && j.result.success === false && j.result.result_message_user) {
+          captured.lastPortalMessage = j.result.result_message_user;
+        }
+
+        if (
+          url.includes('consulta_factura') &&
+          !url.includes('consulta_facturas_uuid') &&
+          j?.list_facturas?.[0]?.document
+        ) {
+          captured.docData = j;
+          console.log('[HEB] Documento XML/PDF (consulta_factura)');
+        }
       } catch {}
     });
 
@@ -189,45 +234,57 @@ async function _generarFacturaHEB(ticketData, userData) {
     console.log('[HEB] Datos fiscales OK');
 
     // ── 10. Generar factura ───────────────────────────────────────────────────
-    // Registrar waitForResponse ANTES del click: si la respuesta llega antes de
-    // attachar el listener, Playwright hace timeout (race típica).
     const TIMBRAR_MS = 120_000;
-    const esTimbrar = (r) => {
-      const u = r.url().toLowerCase();
-      if (!u.includes('/cli/api') || !u.includes('timbrar')) return false;
-      const m = r.request().method();
-      return m === 'POST' || m === 'PUT' || m === 'PATCH';
-    };
-    const esConsultaDocumento = (r) => {
-      const u = r.url();
-      return u.includes('consulta_factura') && !u.includes('uuid') && !u.includes('consulta_facturas_uuid');
-    };
+    const genBtn = page.getByRole('button', { name: /generar factura/i });
+    await genBtn.waitFor({ state: 'visible', timeout: 15_000 });
+    console.log('[HEB] Botón Generar factura habilitado:', await genBtn.isEnabled());
 
-    const timbradoPromise = page.waitForResponse(esTimbrar, { timeout: TIMBRAR_MS });
-    const consultaFacturaPromise = page.waitForResponse(esConsultaDocumento, { timeout: TIMBRAR_MS }).catch(() => null);
-
-    await page.getByRole('button', { name: /generar factura/i }).click();
+    await genBtn.click({ timeout: 20_000 });
     console.log('[HEB] Click Generar factura');
 
-    const timbradoRes = await timbradoPromise;
-    captured.timbrado = await timbradoRes.json().catch(() => null);
+    let lastLog = 0;
+    const tWait = Date.now();
+    while (Date.now() - tWait < TIMBRAR_MS) {
+      if (captured.timbrado?.result?.success) break;
+      const elapsed = Date.now() - tWait;
+      if (elapsed - lastLog >= 15_000) {
+        lastLog = elapsed;
+        console.log('[HEB] Esperando timbrado...', Math.round(elapsed / 1000), 's');
+      }
+      await page.waitForTimeout(400);
+    }
+
     await page.screenshot({ path: '/tmp/heb_step6.png' });
 
     if (!captured.timbrado?.result?.success) {
-      throw new Error(`HEB timbrado fallo: ${captured.timbrado?.result?.result_message_user ?? 'error desconocido'}`);
+      const hint = captured.lastPortalMessage ? ` Portal: ${captured.lastPortalMessage}` : '';
+      throw new Error(
+        `HEB timeout o sin respuesta de timbrado.${hint} Revisa logs [HEB] API para la ruta real.`
+      );
     }
     const facturaInfo = captured.timbrado.list_facturas?.[0];
-    if (!facturaInfo?.comp_id) throw new Error('HEB timbrado sin comp_id');
+    if (!facturaInfo?.comp_id && !facturaInfo?.document) {
+      throw new Error('HEB timbrado sin comp_id ni documento');
+    }
     console.log('[HEB] Timbrado OK comp_id:', facturaInfo.comp_id);
 
     // ── 11. Capturar XML y PDF ────────────────────────────────────────────────
-    await page.waitForTimeout(2_000);
-    const docRes = await consultaFacturaPromise;
-    if (docRes) captured.docData = await docRes.json().catch(() => null);
+    const DOC_MS = 60_000;
+    const tDoc = Date.now();
+    while (Date.now() - tDoc < DOC_MS) {
+      const inline = facturaInfo?.document;
+      if (inline?.xml && inline?.pdf) break;
+      if (captured.docData?.list_facturas?.[0]?.document?.xml) break;
+      await page.waitForTimeout(500);
+    }
+    await page.waitForTimeout(1_000);
     await page.screenshot({ path: '/tmp/heb_step7.png' });
-    console.log('[HEB] docData:', !!captured.docData?.list_facturas?.length);
 
-    const doc = captured.docData?.list_facturas?.[0]?.document;
+    const doc =
+      facturaInfo?.document?.xml && facturaInfo?.document?.pdf
+        ? facturaInfo.document
+        : captured.docData?.list_facturas?.[0]?.document;
+    console.log('[HEB] docData:', !!doc?.xml, !!doc?.pdf);
     if (!doc?.xml) throw new Error('HEB sin XML en respuesta');
     if (!doc?.pdf) throw new Error('HEB sin PDF en respuesta');
 
