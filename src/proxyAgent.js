@@ -1,4 +1,5 @@
 const { HttpsProxyAgent } = require('https-proxy-agent');
+const proxyChain = require('proxy-chain');
 
 const ENV_KEY = {
   sticky: 'PROXY_URL_STICKY',
@@ -179,21 +180,59 @@ function getPlaywrightProxyOxxoGas() {
 }
 
 /**
- * Chromium no soporta SOCKS5 con usuario/contraseña (Playwright lanza error al launch).
- * En ese caso hay que usar Firefox.
- * @param {object|undefined} proxy
- * @returns {'chromium'|'firefox'}
+ * Convierte { server, username, password } al URL upstream que entiende proxy-chain.
  */
-function playwrightBrowserForOxxoGasProxy(proxy) {
-  if (!proxy?.server) return 'chromium';
-  const s = String(proxy.server).toLowerCase();
-  const socks = s.startsWith('socks5://') || s.startsWith('socks4://');
-  const hasAuth = Boolean(
-    (proxy.username != null && String(proxy.username) !== '') ||
-      (proxy.password != null && String(proxy.password) !== '')
-  );
-  if (socks && hasAuth) return 'firefox';
-  return 'chromium';
+function playwrightShapeToUpstreamUrl(p) {
+  const raw = String(p.server).trim();
+  const u = new URL(raw.includes('://') ? raw : `http://${raw}`);
+  const hasAuth =
+    (p.username != null && String(p.username) !== '') ||
+    (p.password != null && String(p.password) !== '');
+
+  if (u.protocol === 'socks5:' || u.protocol === 'socks4:') {
+    const port = u.port || 1080;
+    if (!hasAuth) return `${u.protocol}//${u.hostname}:${port}`;
+    const user = encodeURIComponent(String(p.username || ''));
+    const pass = encodeURIComponent(String(p.password !== undefined ? p.password : ''));
+    const proto = u.protocol === 'socks4:' ? 'socks4' : 'socks5';
+    return `${proto}://${user}:${pass}@${u.hostname}:${port}`;
+  }
+
+  const port = u.port || (u.protocol === 'https:' ? '443' : '80');
+  if (!hasAuth) return `${u.protocol}//${u.hostname}:${port}`;
+  const user = encodeURIComponent(String(p.username || ''));
+  const pass = encodeURIComponent(String(p.password !== undefined ? p.password : ''));
+  return `${u.protocol}//${user}:${pass}@${u.hostname}:${port}`;
+}
+
+/**
+ * Playwright rechaza socks5+auth y es frágil con http+auth (normalizeProxySettings).
+ * proxy-chain expone http://127.0.0.1:puerto sin auth → upstream con credenciales.
+ * @returns {Promise<{ proxy: object|undefined, teardown: () => Promise<void> }>}
+ */
+async function prepareOxxoGasPlaywrightProxy() {
+  const p = getPlaywrightProxyOxxoGas();
+  if (!p) {
+    return { proxy: undefined, teardown: async () => {} };
+  }
+
+  const hasAuth =
+    (p.username != null && String(p.username) !== '') ||
+    (p.password != null && String(p.password) !== '');
+  if (!hasAuth) {
+    return { proxy: p, teardown: async () => {} };
+  }
+
+  const upstream = playwrightShapeToUpstreamUrl(p);
+  const localUrl = await proxyChain.anonymizeProxy(upstream);
+  return {
+    proxy: { server: localUrl },
+    teardown: async () => {
+      try {
+        await proxyChain.closeAnonymizedProxy(localUrl, true);
+      } catch (_) {}
+    },
+  };
 }
 
 const { SocksProxyAgent } = require('socks-proxy-agent');
@@ -209,6 +248,6 @@ module.exports = {
   getPlaywrightProxy,
   getPlaywrightProxyOxxoTienda,
   getPlaywrightProxyOxxoGas,
-  playwrightBrowserForOxxoGasProxy,
+  prepareOxxoGasPlaywrightProxy,
   getSocksAgent,
 };
