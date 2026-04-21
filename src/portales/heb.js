@@ -32,17 +32,12 @@ async function _generarFacturaHEB(ticketData, userData) {
     const page = await context.newPage();
     const captured = {};
 
-    // ── Capturar respuestas del SPA ───────────────────────────────────────────
+    // ── Capturar respuestas auxiliares (no timbrar/consulta doc: se leen en waitForResponse) ──
     page.on('response', async (res) => {
       try {
         const url = res.url();
         if (!url.includes('/cli/api')) return;
-        if (url.includes('timbrar') && res.request().method() === 'POST')
-          captured.timbrado = await res.json();
-        else if (url.includes('consulta_facturas_uuid'))
-          captured.uuidData = await res.json();
-        else if (url.includes('consulta_factura') && !url.includes('uuid'))
-          captured.docData = await res.json();
+        if (url.includes('consulta_facturas_uuid')) captured.uuidData = await res.json();
       } catch {}
     });
 
@@ -194,20 +189,27 @@ async function _generarFacturaHEB(ticketData, userData) {
     console.log('[HEB] Datos fiscales OK');
 
     // ── 10. Generar factura ───────────────────────────────────────────────────
-    // Registrar el wait ANTES del click — evita race condition donde la respuesta
-    // llega antes de que empecemos a escuchar
-    const consultaFacturaPromise = page.waitForResponse(
-      r => r.url().includes('consulta_factura') && !r.url().includes('uuid'),
-      { timeout: 30_000 }
-    ).catch(() => null);
+    // Registrar waitForResponse ANTES del click: si la respuesta llega antes de
+    // attachar el listener, Playwright hace timeout (race típica).
+    const TIMBRAR_MS = 120_000;
+    const esTimbrar = (r) => {
+      const u = r.url().toLowerCase();
+      if (!u.includes('/cli/api') || !u.includes('timbrar')) return false;
+      const m = r.request().method();
+      return m === 'POST' || m === 'PUT' || m === 'PATCH';
+    };
+    const esConsultaDocumento = (r) => {
+      const u = r.url();
+      return u.includes('consulta_factura') && !u.includes('uuid') && !u.includes('consulta_facturas_uuid');
+    };
+
+    const timbradoPromise = page.waitForResponse(esTimbrar, { timeout: TIMBRAR_MS });
+    const consultaFacturaPromise = page.waitForResponse(esConsultaDocumento, { timeout: TIMBRAR_MS }).catch(() => null);
 
     await page.getByRole('button', { name: /generar factura/i }).click();
     console.log('[HEB] Click Generar factura');
 
-    const timbradoRes = await page.waitForResponse(
-      r => r.url().includes('timbrar') && r.request().method() === 'POST',
-      { timeout: 30_000 }
-    );
+    const timbradoRes = await timbradoPromise;
     captured.timbrado = await timbradoRes.json().catch(() => null);
     await page.screenshot({ path: '/tmp/heb_step6.png' });
 
