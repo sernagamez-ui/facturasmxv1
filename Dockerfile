@@ -12,6 +12,9 @@ RUN npm ci --omit=dev
 
 COPY . .
 
+# OXXO Gas: SOCKS5 con auth requiere Firefox (Chromium no lo soporta en Playwright).
+RUN npx playwright install firefox
+
 # SQLite y sesiones: en Railway conviene volumen en /data (ver src/dataDir.js)
 RUN mkdir -p /data
 

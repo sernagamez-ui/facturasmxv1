@@ -1,8 +1,11 @@
 const fs = require('fs');
 const path = require('path');
-const { chromium } = require('playwright');
+const { chromium, firefox } = require('playwright');
 const { resolveDataDir } = require('./src/dataDir');
-const { getPlaywrightProxyOxxoGas } = require('./src/proxyAgent');
+const {
+  getPlaywrightProxyOxxoGas,
+  playwrightBrowserForOxxoGasProxy,
+} = require('./src/proxyAgent');
 
 (async () => {
   const dataDir = resolveDataDir();
@@ -10,15 +13,17 @@ const { getPlaywrightProxyOxxoGas } = require('./src/proxyAgent');
   const sessionFile = path.join(dataDir, 'oxxogas-session.json');
 
   const proxy = getPlaywrightProxyOxxoGas();
+  const browserName = playwrightBrowserForOxxoGasProxy(proxy);
   console.log(
     '[save-session] proxy:',
-    proxy ? `${proxy.server} (misma lógica que facturarOxxoGas)` : 'directo (sin OXXOGAS_USE_PLAYWRIGHT_PROXY=1)'
+    proxy ? `${proxy.server} browser=${browserName}` : 'directo (sin OXXOGAS_USE_PLAYWRIGHT_PROXY=1)'
   );
 
-  const browser = await chromium.launch({
-    headless: false,
-    ...(proxy ? { proxy } : {}),
-  });
+  const launchBase = { headless: false, ...(proxy ? { proxy } : {}) };
+  const browser =
+    browserName === 'firefox'
+      ? await firefox.launch(launchBase)
+      : await chromium.launch(launchBase);
   const context = await browser.newContext();
   const page = await context.newPage();
 

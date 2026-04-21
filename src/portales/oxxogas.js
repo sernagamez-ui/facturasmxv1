@@ -2,11 +2,14 @@
 // Adaptador Playwright para OXXO Gas
 // Sesión persistente — login manual una vez con save-session.js
 
-const { chromium } = require('playwright');
+const { chromium, firefox } = require('playwright');
 const fs = require('fs');
 const path = require('path');
 const { resolveDataDir } = require('../dataDir');
-const { getPlaywrightProxyOxxoGas } = require('../proxyAgent');
+const {
+  getPlaywrightProxyOxxoGas,
+  playwrightBrowserForOxxoGasProxy,
+} = require('../proxyAgent');
 
 const PORTAL_URL = 'https://facturacion.oxxogas.com';
 const DATA_DIR = resolveDataDir();
@@ -22,12 +25,22 @@ async function facturarOxxoGas({ estacion, noTicket, monto, userData, esEfectivo
 
   // Sin OXXOGAS_USE_PLAYWRIGHT_PROXY: directo. Con 1: OXXOGAS_PROXY_URL → SOCKS5 → HTTP sticky (ver proxyAgent).
   const proxy = getPlaywrightProxyOxxoGas();
-  console.log('[OxxoGas] Playwright proxy:', proxy ? `on (${proxy.server})` : 'off (directo)');
-  const browser = await chromium.launch({
+  const browserName = playwrightBrowserForOxxoGasProxy(proxy);
+  console.log(
+    '[OxxoGas] Playwright proxy:',
+    proxy ? `on (${proxy.server}) browser=${browserName}` : `off (directo) browser=${browserName}`
+  );
+  const launchBase = {
     headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
     ...(proxy ? { proxy } : {}),
-  });
+  };
+  const browser =
+    browserName === 'firefox'
+      ? await firefox.launch(launchBase)
+      : await chromium.launch({
+          ...launchBase,
+          args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+        });
   const context = await browser.newContext({ storageState: SESSION_FILE });
   const page = await context.newPage();
 

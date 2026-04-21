@@ -178,6 +178,24 @@ function getPlaywrightProxyOxxoGas() {
   return getPlaywrightProxy();
 }
 
+/**
+ * Chromium no soporta SOCKS5 con usuario/contraseña (Playwright lanza error al launch).
+ * En ese caso hay que usar Firefox.
+ * @param {object|undefined} proxy
+ * @returns {'chromium'|'firefox'}
+ */
+function playwrightBrowserForOxxoGasProxy(proxy) {
+  if (!proxy?.server) return 'chromium';
+  const s = String(proxy.server).toLowerCase();
+  const socks = s.startsWith('socks5://') || s.startsWith('socks4://');
+  const hasAuth = Boolean(
+    (proxy.username != null && String(proxy.username) !== '') ||
+      (proxy.password != null && String(proxy.password) !== '')
+  );
+  if (socks && hasAuth) return 'firefox';
+  return 'chromium';
+}
+
 const { SocksProxyAgent } = require('socks-proxy-agent');
 
 function getSocksAgent() {
@@ -191,5 +209,6 @@ module.exports = {
   getPlaywrightProxy,
   getPlaywrightProxyOxxoTienda,
   getPlaywrightProxyOxxoGas,
+  playwrightBrowserForOxxoGasProxy,
   getSocksAgent,
 };
