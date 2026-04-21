@@ -276,9 +276,17 @@ async function registrarOObtenerRfc(page, userData, usoCfdi) {
 
   if (!coloniaResp.loc_id) throw new Error(`CP ${userData.cp} no encontrado en portal OXXO Gas`);
 
+  // regimen (portal): 1 = persona física, 2 = persona moral. Antes estaba fijo en '1' y fallaba RFC moral.
+  const regimenTipoPersona = esPersonaMoralRfc(userData.rfc) ? '2' : '1';
+  console.log(
+    `[OxxoGas] Alta RFC portal: tipo=${regimenTipoPersona === '2' ? 'moral' : 'física'} régimen_fiscal=${userData.regimen}`
+  );
   const body = new URLSearchParams({
-    isCFDI4: 'true', regimen: '1', regimen_fiscal: String(userData.regimen),
-    usocfdi: usoCfdi, razonsocial: userData.nombre,
+    isCFDI4: 'true',
+    regimen: regimenTipoPersona,
+    regimen_fiscal: String(userData.regimen),
+    usocfdi: usoCfdi,
+    razonsocial: userData.nombre,
     estado: String(coloniaResp.est_id), municipio: String(coloniaResp.mun_clave),
     colonia: String(coloniaResp.loc_id), cp: String(userData.cp),
     calle: userData.calle || 'SIN CALLE', noext: userData.noext || 'S/N',
@@ -311,6 +319,13 @@ async function registrarOObtenerRfc(page, userData, usoCfdi) {
 
 function getUsoCfdi(regimen) {
   return { '605': 'S01', '612': 'G03', '626': 'G03' }[String(regimen)] || 'G03';
+}
+
+/** Misma regla que conversation.js: moral 12 chars, física 13. */
+function esPersonaMoralRfc(rfc) {
+  return String(rfc || '')
+    .replace(/\s/g, '')
+    .length === 12;
 }
 
 module.exports = { facturarOxxoGas };
