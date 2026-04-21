@@ -52,7 +52,8 @@ async function leerTicket(imageBuffer, mimeType = 'image/jpeg') {
     ORIGON_CDC_BRANDS.has(comercio) ||
     comercio === '7eleven' ||
     comercio === 'oxxo' ||
-    comercio === 'mcdonalds'
+    comercio === 'mcdonalds' ||
+    comercio === 'petro7'
       ? MODEL_SONNET
       : MODEL;
 
@@ -249,38 +250,84 @@ async function leerCodigoBarras7Eleven(imageBuffer) {
 }
 
 // ─────────────────────────────────────────────
-// QR READER — OXXO Gas
+// QR READER — OXXO Gas, Petro 7, etc. (QR suele ir abajo del ticket)
 // ─────────────────────────────────────────────
 
 async function leerQR(imageBuffer) {
-  // Intento 1 — zxing-wasm (más robusto con imágenes comprimidas)
+  let readBarcodesFromImageData;
   try {
-    const { readBarcodesFromImageData } = require('zxing-wasm/reader');
-    const image = await Jimp.fromBuffer(imageBuffer);
-    const { data, width, height } = image.bitmap;
+    ({ readBarcodesFromImageData } = require('zxing-wasm/reader'));
+  } catch (err) {
+    console.log('[ticketReader] zxing no disponible:', err.message);
+  }
+
+  async function zxingFromJimp(jimpImage) {
+    if (!readBarcodesFromImageData) return null;
+    const { data, width, height } = jimpImage.bitmap;
     const imageData = { data: new Uint8ClampedArray(data), width, height };
     const results = await readBarcodesFromImageData(imageData, {
       formats: ['QRCode'],
       tryHarder: true,
     });
-    if (results && results.length > 0) {
-      console.log('[ticketReader] QR detectado (zxing):', results[0].text);
-      return results[0].text;
-    }
-  } catch (err) {
-    console.log('[ticketReader] zxing falló:', err.message);
+    return results?.length > 0 ? results[0].text : null;
   }
 
-  // Intento 2 — jsQR con múltiples escalas (fallback)
+  async function scanOneJimp(jimpImage) {
+    const zx = await zxingFromJimp(jimpImage);
+    if (zx) return { text: zx, via: 'zxing' };
+    const jq = intentarLeerQR(jimpImage);
+    if (jq) return { text: jq, via: 'jsQR' };
+    return null;
+  }
+
   try {
-    const image = await Jimp.fromBuffer(imageBuffer);
-    for (const scale of [1, 2, 1.5]) {
-      const img = scale === 1 ? image.clone() : image.clone().scale(scale);
-      const code = intentarLeerQR(img);
-      if (code) return code;
+    const base = await Jimp.fromBuffer(imageBuffer);
+    const W = base.bitmap.width;
+    const H = base.bitmap.height;
+
+    const crops = [{ label: 'full', img: base.clone() }];
+    for (const frac of [0.45, 0.35, 0.28]) {
+      const ch = Math.max(120, Math.floor(H * frac));
+      const cy = Math.max(0, H - ch);
+      try {
+        crops.push({
+          label: `bottom_${Math.round(frac * 100)}pct`,
+          img: base.clone().crop({ x: 0, y: cy, w: W, h: ch }),
+        });
+      } catch {
+        try {
+          crops.push({
+            label: `bottom_${Math.round(frac * 100)}pct`,
+            img: base.clone().crop(0, cy, W, ch),
+          });
+        } catch (e2) {
+          console.log('[ticketReader] QR crop omitido:', e2.message);
+        }
+      }
+    }
+
+    for (const { label, img } of crops) {
+      const variants = [
+        { name: 'raw', j: img.clone() },
+        { name: 'grey_norm', j: img.clone().greyscale().normalize() },
+        { name: 'scale1.5', j: img.clone().scale(1.5) },
+        { name: 'scale2_grey', j: img.clone().scale(2).greyscale().normalize() },
+        { name: 'scale2.5', j: img.clone().scale(2.5) },
+      ];
+      for (const { name, j } of variants) {
+        try {
+          const hit = await scanOneJimp(j);
+          if (hit) {
+            console.log(`[ticketReader] QR detectado (${hit.via}, ${label}/${name}):`, hit.text);
+            return hit.text;
+          }
+        } catch (err) {
+          console.log(`[ticketReader] QR scan ${label}/${name}:`, err.message);
+        }
+      }
     }
   } catch (err) {
-    console.log('[ticketReader] jsQR falló:', err.message);
+    console.log('[ticketReader] leerQR falló:', err.message);
   }
 
   console.log('[ticketReader] QR no encontrado en imagen');
@@ -590,7 +637,7 @@ Los campos que necesito son:
 {
   "encontrado": true,
   "comercio": "Petro 7",
-  "noEstacion": "número de estación — busca 'Estación', 'Sucursal', 'No. Estación' o el número de 4 dígitos en el encabezado del ticket",
+  "noEstacion": "SOLO el número de 4 dígitos de la línea etiquetada 'Estacion' / 'Estación' (la que va junto a Folio y Web ID en el bloque de facturación). NO es el código postal",
   "noTicket": "FOLIO del ticket — número de 7 dígitos junto a la palabra FOLIO. SIEMPRE diferente al No. Estación",
   "wid": "Web ID — busca exactamente 'WID' o 'Web ID' seguido de un código de exactamente 4 caracteres alfanuméricos",
   "fecha": "fecha de la compra en formato YYYY-MM-DD",
@@ -606,14 +653,16 @@ REGLAS CRÍTICAS DE LECTURA ÓPTICA — lee cada número con cuidado:
 - La letra I y la letra L se parecen al número 1 — en números usa siempre 1.
 - La letra S se parece al número 5 — en contexto de número de estación usa el dígito correcto.
 - La letra B se parece al número 8 — en el WID puede ser letra B o número 8, cópialo exactamente.
+- El dígito 8 tiene dos círculos/aperturas. El 6 tiene una curva cerrada abajo. NO confundas 8 con 6 en el FOLIO.
 
 INSTRUCCIÓN ESPECIAL PARA noEstacion:
-Antes de escribir el valor de noEstacion, léelo dos veces mirando el primer dígito con atención.
-Los números de estación Petro 7 típicamente empiezan con 6. Si ves un 5 al inicio, verifica si realmente es un 6.
+PROHIBIDO usar números del encabezado de dirección: el texto "CP:" o "C.P." va seguido de 5 dígitos (código postal, ej. 66450). Ese NO es noEstacion.
+Si copias un número parecido al CP (ej. 6450 saliendo de 66450), es un error: vuelve a la línea "Estacion" junto a Folio/Web ID.
+Antes de escribir noEstacion, léelo dos veces en ESA línea solamente. Los números de estación Petro 7 suelen empezar por 6. Confunde 5 con 6: verifica el primer dígito.
 
 INSTRUCCIÓN ESPECIAL PARA noTicket:
-El FOLIO tiene 7 dígitos y aparece explícitamente junto a la palabra "FOLIO".
-NUNCA puede ser igual al noEstacion (que tiene 4 dígitos).
+El FOLIO tiene 7 dígitos en la misma zona que Estacion y Web ID (no en la tabla de productos).
+NUNCA puede ser igual al noEstacion (4 dígitos). Relee el FOLIO carácter a carácter (especialmente 6 vs 8).
 
 INSTRUCCION ESPECIAL PARA fecha:
 El ano actual es ${anioActual}. Si ves los dos ultimos digitos del ano en la fecha, el ano completo es ${anioActual}. Ejemplo: "19/03/26" o "19/03/2026" -> "${anioActual}-03-19".

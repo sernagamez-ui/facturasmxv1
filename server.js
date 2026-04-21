@@ -17,7 +17,7 @@ const os      = require('os');
 const cron    = require('node-cron');
 
 const db                                = require('./src/db');
-const { handleTicket, handleRetryAlsea }= require('./src/ticketHandler');
+const { handleTicket, handleRetryAlsea, handleRetryPetro7Estacion } = require('./src/ticketHandler');
 const { enqueue, stats: queueStats }    = require('./src/facturaQueue');
 const { leerTicket }                    = require('./src/ticketReader');
 const { clasificarGasto, determinarUsoCfdi, mensajeFiscal, calcularDeducibilidad } = require('./src/fiscalRules');
@@ -144,6 +144,31 @@ bot.on('text', async (ctx) => {
   if (texto === '❓ Ayuda')        return handleAyuda(ctx);
 
   const state = db.getState(userId);
+
+  // Retry Petro 7 — estación / folio corregidos por texto
+  if (state?.step === 'ESPERANDO_ESTACION_PETRO7') {
+    const userData = db.getUser(userId);
+    const msg = await ctx.reply('⏳ Reintentando factura Petro 7...');
+    try {
+      const resultado = await handleRetryPetro7Estacion(userId, texto, userData);
+      await ctx.telegram.deleteMessage(ctx.chat.id, msg.message_id).catch(() => {});
+      await ctx.reply(
+        resultado.mensajeBot,
+        resultado.ok === true ? { parse_mode: 'Markdown' } : {}
+      );
+      if (resultado.pdfPath && fs.existsSync(resultado.pdfPath)) {
+        await ctx.replyWithDocument({ source: resultado.pdfPath, filename: `factura_${Date.now()}.pdf` }, { caption: '📄 PDF' });
+      }
+      if (resultado.xmlPath && fs.existsSync(resultado.xmlPath)) {
+        await ctx.replyWithDocument({ source: resultado.xmlPath, filename: `factura_${Date.now()}.xml` }, { caption: '🗂 XML' });
+      }
+    } catch (err) {
+      await ctx.telegram.deleteMessage(ctx.chat.id, msg.message_id).catch(() => {});
+      db.setState(userId, null);
+      await ctx.reply('❌ Error reintentando. Mándame otra foto del ticket.');
+    }
+    return;
+  }
 
   // Retry Alsea
   if (state?.step === 'ESPERANDO_DATOS_ALSEA') {

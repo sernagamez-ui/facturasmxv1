@@ -95,6 +95,14 @@ async function handleTicket(ctx, fileId, userData) {
     console.log(`[ticketHandler] Verificación getState: step=${check?.step}`);
   }
 
+  if (resultado.esperandoEstacion && ticketData.comercio === 'petro7') {
+    db.setState(userId, {
+      step: 'ESPERANDO_ESTACION_PETRO7',
+      ticketData: { ...ticketData },
+    });
+    console.log(`[ticketHandler] Estado ESPERANDO_ESTACION_PETRO7 guardado para userId=${userId}`);
+  }
+
   // ── 6. Guardar factura en historial ───────────────────────────────────────
   let totalParaUi = null;
   if (resultado.ok) {
@@ -345,4 +353,71 @@ function _mensajeError(resultado, ticketData) {
   );
 }
 
-module.exports = { handleTicket, handleRetryAlsea };
+/**
+ * Reintenta Petro 7 cuando el usuario corrige estación (y opcionalmente folio) por Telegram.
+ * Texto: "6131" o "6131 2518259"
+ */
+async function handleRetryPetro7Estacion(userId, texto, userData) {
+  const state = db.getState(userId);
+
+  if (!state || state.step !== 'ESPERANDO_ESTACION_PETRO7' || !state.ticketData) {
+    return { mensajeBot: '❌ No hay un ticket Petro 7 pendiente. Mándame una nueva foto del ticket.', ok: false };
+  }
+
+  const compact = texto.trim().replace(/\s+/g, ' ');
+  let noEstacion;
+  let noTicketOpt;
+  const mTwo = compact.match(/^(\d{4})\s+(\d{5,10})$/);
+  const mOne = compact.match(/^(\d{4})$/);
+  if (mTwo) {
+    noEstacion = mTwo[1];
+    noTicketOpt = mTwo[2];
+  } else if (mOne) {
+    noEstacion = mOne[1];
+  } else {
+    return {
+      mensajeBot:
+        '❌ Escribe la *Estación* (4 dígitos) o *Estación* y *Folio* separados por un espacio.\n\n' +
+        'Ejemplos: `6131` o `6131 2518259`',
+      ok: false,
+    };
+  }
+
+  db.setState(userId, null);
+
+  const ticketData = {
+    ...state.ticketData,
+    comercio: 'petro7',
+    noEstacion,
+  };
+  if (noTicketOpt) ticketData.noTicket = noTicketOpt;
+
+  console.log(
+    `[ticketHandler] Retry Petro 7 manual: noEstacion=${noEstacion}` +
+      (noTicketOpt ? ` noTicket=${noTicketOpt}` : '')
+  );
+
+  const outputDir = path.join(os.tmpdir(), 'cotas', userId, Date.now().toString());
+  const resultado = await procesarFactura(ticketData, userData, userId, outputDir);
+
+  if (resultado.esperandoEstacion) {
+    db.setState(userId, { step: 'ESPERANDO_ESTACION_PETRO7', ticketData: { ...ticketData } });
+  }
+
+  if (resultado.ok) {
+    _guardarEnHistorial(userId, ticketData, resultado, userData);
+  }
+
+  const mensajeBot = resultado.ok
+    ? _mensajeExito(ticketData, resultado, userData)
+    : (resultado.userMessage || _mensajeError(resultado, ticketData));
+
+  return {
+    mensajeBot,
+    pdfPath: resultado.pdfPath || null,
+    xmlPath: resultado.xmlPath || null,
+    ok: !!resultado.ok,
+  };
+}
+
+module.exports = { handleTicket, handleRetryAlsea, handleRetryPetro7Estacion };

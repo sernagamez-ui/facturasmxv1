@@ -225,26 +225,31 @@ async function facturarPetro7({ gasolinera, folio, webId, fecha, userData, outpu
       return { ok: false, error: 'ya_facturado', mensaje: 'Este ticket ya fue facturado anteriormente.' };
     }
     if (v.status === '4') {
-      // Vision confunde 6 con 5 frecuentemente — reintento automático
+      // Vision confunde 6↔5 en el primer dígito con frecuencia — reintento automático en ambos sentidos
       const estacionStr = String(ticket.estacion);
+      let estacionCorregida = null;
       if (estacionStr.startsWith('5')) {
-        const estacionCorregida = '6' + estacionStr.slice(1);
+        estacionCorregida = '6' + estacionStr.slice(1);
         console.log(`[Petro7] status=4, reintentando con estación ${estacionCorregida} (corrigiendo 5→6)`);
+      } else if (estacionStr.startsWith('6')) {
+        estacionCorregida = '5' + estacionStr.slice(1);
+        console.log(`[Petro7] status=4, reintentando con estación ${estacionCorregida} (corrigiendo 6→5)`);
+      }
+      if (estacionCorregida) {
         const v2 = await verificarTicket({ ...ticket, estacion: estacionCorregida });
         console.log(`[Petro7] reintento → status=${v2.status} mensaje="${v2.mensaje}"`);
         if (v2.valido) {
           ticket.estacion = estacionCorregida;
           Object.assign(v, v2);
-        } else {
-          return {
-            ok: false, error: 'estacion_invalida', esperandoEstacion: true,
-            userMessage: '⚠️ No pude leer bien el número de estación del ticket.\n\nResponde con el número de *Estación* que aparece en tu ticket (4 dígitos) y lo intento de nuevo.',
-          };
         }
-      } else {
+      }
+      if (!v.valido) {
         return {
           ok: false, error: 'estacion_invalida', esperandoEstacion: true,
-          userMessage: '⚠️ No pude leer bien el número de estación del ticket.\n\nResponde con el número de *Estación* que aparece en tu ticket (4 dígitos) y lo intento de nuevo.',
+          userMessage:
+            '⚠️ No pude leer bien el número de *Estación* del ticket (a veces se confunde con el código postal del encabezado).\n\n' +
+            'Responde solo los *4 dígitos* junto a la palabra Estación (misma zona que Folio y Web ID).\n\n' +
+            'Si el *Folio* (7 dígitos) también está mal, envía los dos separados por un espacio:\n`ESTACIÓN FOLIO`',
         };
       }
     }
