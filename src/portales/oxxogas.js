@@ -20,7 +20,12 @@ async function facturarOxxoGas({ estacion, noTicket, monto, userData, esEfectivo
     return { ok: false, error: 'No hay sesión guardada. Corre: node save-session.js' };
   }
 
-  const proxy = getPlaywrightProxy();
+  // Por defecto sin proxy: PROXY_URL_STICKY (p. ej. para Petro 7) suele romper el túnel a facturacion.oxxogas.com (ERR_TUNNEL_CONNECTION_FAILED).
+  const proxy =
+    String(process.env.OXXOGAS_USE_PLAYWRIGHT_PROXY || '').trim() === '1'
+      ? getPlaywrightProxy()
+      : undefined;
+  console.log('[OxxoGas] Playwright proxy:', proxy ? 'on' : 'off (directo)');
   const browser = await chromium.launch({
     headless: true,
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
