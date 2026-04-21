@@ -119,6 +119,65 @@ function getPlaywrightProxyOxxoTienda() {
   }
 }
 
+/**
+ * Playwright para OXXO Gas cuando OXXOGAS_USE_PLAYWRIGHT_PROXY=1.
+ * Orden: OXXOGAS_PROXY_URL → PROXY_URL_SOCKS5 → PROXY_URL_STICKY (HTTP).
+ * El túnel HTTP a facturacion.oxxogas.com suele dar ERR_TUNNEL_CONNECTION_FAILED;
+ * SOCKS5 suele funcionar mejor con el mismo proveedor.
+ * @returns {object|undefined}
+ */
+function getPlaywrightProxyOxxoGas() {
+  if (String(process.env.OXXOGAS_USE_PLAYWRIGHT_PROXY || '').trim() !== '1') {
+    return undefined;
+  }
+
+  const tryUrl = (raw, label) => {
+    const s = raw != null ? String(raw).trim() : '';
+    if (!s) return null;
+    try {
+      const p = new URL(s);
+      if (p.protocol === 'socks5:' || p.protocol === 'socks4:') {
+        const port = p.port || '1080';
+        let password = p.password;
+        try {
+          password = decodeURIComponent(p.password);
+        } catch (_) {
+          password = p.password;
+        }
+        const o = { server: `socks5://${p.hostname}:${port}` };
+        if (p.username) {
+          o.username = p.username;
+          o.password = password || '';
+        }
+        return o;
+      }
+      const port = p.port || (p.protocol === 'https:' ? '443' : '80');
+      let password = p.password;
+      try {
+        password = decodeURIComponent(p.password);
+      } catch (_) {
+        password = p.password;
+      }
+      return {
+        server: `${p.protocol}//${p.hostname}:${port}`,
+        username: p.username || undefined,
+        password: password || undefined,
+      };
+    } catch (e) {
+      console.warn(`[proxyAgent] ${label} URL inválida:`, e.message);
+      return null;
+    }
+  };
+
+  let cfg = tryUrl(process.env.OXXOGAS_PROXY_URL, 'OXXOGAS_PROXY_URL');
+  if (cfg) return cfg;
+
+  cfg = tryUrl(process.env.PROXY_URL_SOCKS5, 'PROXY_URL_SOCKS5');
+  if (cfg) return cfg;
+
+  return getPlaywrightProxy();
+}
+
 const { SocksProxyAgent } = require('socks-proxy-agent');
 
 function getSocksAgent() {
@@ -131,5 +190,6 @@ module.exports = {
   getProxyAgent,
   getPlaywrightProxy,
   getPlaywrightProxyOxxoTienda,
+  getPlaywrightProxyOxxoGas,
   getSocksAgent,
 };

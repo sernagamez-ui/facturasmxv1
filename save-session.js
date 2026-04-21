@@ -2,19 +2,17 @@ const fs = require('fs');
 const path = require('path');
 const { chromium } = require('playwright');
 const { resolveDataDir } = require('./src/dataDir');
-const { getPlaywrightProxy } = require('./src/proxyAgent');
+const { getPlaywrightProxyOxxoGas } = require('./src/proxyAgent');
 
 (async () => {
   const dataDir = resolveDataDir();
   if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
   const sessionFile = path.join(dataDir, 'oxxogas-session.json');
 
-  const useProxy =
-    String(process.env.OXXOGAS_USE_PLAYWRIGHT_PROXY || '').trim() === '1';
-  const proxy = useProxy ? getPlaywrightProxy() : undefined;
+  const proxy = getPlaywrightProxyOxxoGas();
   console.log(
-    '[save-session] OXXOGAS_USE_PLAYWRIGHT_PROXY:',
-    useProxy ? '1 (misma salida que facturarOxxoGas en prod)' : '0 (directo)'
+    '[save-session] proxy:',
+    proxy ? `${proxy.server} (misma lógica que facturarOxxoGas)` : 'directo (sin OXXOGAS_USE_PLAYWRIGHT_PROXY=1)'
   );
 
   const browser = await chromium.launch({

@@ -6,7 +6,7 @@ const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
 const { resolveDataDir } = require('../dataDir');
-const { getPlaywrightProxy } = require('../proxyAgent');
+const { getPlaywrightProxyOxxoGas } = require('../proxyAgent');
 
 const PORTAL_URL = 'https://facturacion.oxxogas.com';
 const DATA_DIR = resolveDataDir();
@@ -20,12 +20,9 @@ async function facturarOxxoGas({ estacion, noTicket, monto, userData, esEfectivo
     return { ok: false, error: 'No hay sesión guardada. Corre: node save-session.js' };
   }
 
-  // Por defecto sin proxy: PROXY_URL_STICKY (p. ej. para Petro 7) suele romper el túnel a facturacion.oxxogas.com (ERR_TUNNEL_CONNECTION_FAILED).
-  const proxy =
-    String(process.env.OXXOGAS_USE_PLAYWRIGHT_PROXY || '').trim() === '1'
-      ? getPlaywrightProxy()
-      : undefined;
-  console.log('[OxxoGas] Playwright proxy:', proxy ? 'on' : 'off (directo)');
+  // Sin OXXOGAS_USE_PLAYWRIGHT_PROXY: directo. Con 1: OXXOGAS_PROXY_URL → SOCKS5 → HTTP sticky (ver proxyAgent).
+  const proxy = getPlaywrightProxyOxxoGas();
+  console.log('[OxxoGas] Playwright proxy:', proxy ? `on (${proxy.server})` : 'off (directo)');
   const browser = await chromium.launch({
     headless: true,
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
