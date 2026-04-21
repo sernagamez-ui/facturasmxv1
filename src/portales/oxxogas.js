@@ -39,16 +39,39 @@ async function facturarOxxoGas({ estacion, noTicket, monto, userData, esEfectivo
     console.log('[OxxoGas] Verificando sesión...');
     await page.goto(`${PORTAL_URL}/home`, GOTO);
 
-    const isLoggedIn = await page.evaluate(async () => {
+    const afterUrl = page.url();
+    console.log('[OxxoGas] URL tras /home:', afterUrl);
+
+    const checkResult = await page.evaluate(async () => {
       try {
-        const r = await fetch('/checkuser', { method: 'POST' });
-        const data = await r.json();
-        return data.is_logged === 'TRUE';
-      } catch { return false; }
+        const r = await fetch('/checkuser', { method: 'POST', credentials: 'include' });
+        const text = await r.text();
+        let data;
+        try {
+          data = JSON.parse(text);
+        } catch {
+          return { ok: false, status: r.status, parseError: true, snippet: text.slice(0, 300) };
+        }
+        const logged = data.is_logged === 'TRUE';
+        return { ok: logged, status: r.status, is_logged: data.is_logged, keys: data && typeof data === 'object' ? Object.keys(data) : [] };
+      } catch (e) {
+        return { ok: false, err: String(e && e.message ? e.message : e).slice(0, 300) };
+      }
     });
 
-    if (!isLoggedIn) {
-      return { ok: false, error: 'Sesión expirada. Corre: node save-session.js' };
+    console.log('[OxxoGas] checkuser:', JSON.stringify(checkResult));
+
+    if (!checkResult.ok) {
+      const hint =
+        afterUrl.includes('login') || afterUrl.includes('inicio')
+          ? 'redir_login'
+          : 'checkuser_fallo';
+      console.warn('[OxxoGas] checkuser no OK, hint=', hint);
+      return {
+        ok: false,
+        error:
+          'Sesión no válida en OXXO Gas (el portal no reconoce login). Si acabas de subir oxxogas-session.json, suele ser IP: la sesión se abrió desde tu red y el bot corre en otra (Railway). Opciones: proxy residencial MX con OXXOGAS_USE_PLAYWRIGHT_PROXY=1 y volver a guardar/subir sesión, o revisar en logs la línea [OxxoGas] checkuser.',
+      };
     }
     console.log('[OxxoGas] Sesión activa ✅');
 
