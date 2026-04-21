@@ -382,7 +382,7 @@ async function procesarFactura(ticketData, userData, phone, outputDirOverride) {
       comercio === 'heb' &&
       /waitForResponse|Timeout \d+ms exceeded|playwright|HEB timeout|HEB sin|portal HEB/i.test(raw);
     const userMessage = techHeb
-      ? `⚠️ *Problema con el portal HEB o el timbrado tardó demasiado.*\n\n_${raw.slice(0, 400)}_\n\n` +
+      ? `⚠️ *Problema con el portal HEB al generar la factura o la respuesta tardó demasiado.*\n\n_${raw.slice(0, 400)}_\n\n` +
         `Reintenta en unos minutos. Si sigue igual, factura en facturacion.heb.com.mx o revisa que el deploy tenga el último código.`
       : `⚠️ *No pude leer todos los datos del ticket.*\n\n${raw}\n\n¿Puedes tomar otra foto más clara y cercana?`;
     return {

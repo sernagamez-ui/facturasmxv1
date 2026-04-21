@@ -33,52 +33,79 @@ async function _generarFacturaHEB(ticketData, userData) {
     const captured = {};
 
     /**
-     * El SPA puede llamar timbrar / emitir / otra ruta; no confiar en "timbrar" en la URL.
-     * Identificamos timbrado por JSON: result.success + list_facturas[] con comp_id o documento.
+     * Factura emitida (CFDI): el portal puede no enviar result.success; solo tratamos
+     * success === false como error explícito.
      */
-    function jsonEsTimbradoExitoso(j) {
-      if (!Array.isArray(j?.list_facturas) || j.list_facturas.length === 0) return false;
-      if (j?.result?.success === false) return false;
-      const row = j.list_facturas[0];
-      const okRow = row.comp_id != null || !!(row.document && (row.document.xml || row.document.pdf));
-      if (!okRow) return false;
-      if (j?.result?.success === true) return true;
-      if (j?.result == null && okRow) return true;
-      return false;
+    function extraerListFacturas(j) {
+      if (!j || typeof j !== 'object') return null;
+      if (Array.isArray(j.list_facturas)) return j.list_facturas;
+      if (Array.isArray(j.data?.list_facturas)) return j.data.list_facturas;
+      if (Array.isArray(j.response?.list_facturas)) return j.response.list_facturas;
+      return null;
     }
+
+    function jsonFacturaEmitidaOk(j) {
+      const rows = extraerListFacturas(j);
+      if (!rows?.length) return false;
+      if (j?.result?.success === false) return false;
+      const row = rows[0];
+      return row.comp_id != null || !!(row.document && (row.document.xml || row.document.pdf));
+    }
+
+    let traceRequests = false;
+    /** Solo aceptar JSON de factura emitida después del click (evita confundir otras APIs). */
+    let emitirClicked = false;
+
+    page.on('request', (req) => {
+      if (!traceRequests) return;
+      try {
+        const u = req.url();
+        if (!u.includes('heb.com.mx')) return;
+        const m = req.method();
+        if (m === 'POST' || m === 'PUT' || m === 'PATCH')
+          console.log('[HEB] →', m, new URL(u).pathname);
+      } catch {}
+    });
 
     page.on('response', async (res) => {
       try {
         const url = res.url();
-        if (!url.includes('/cli/api')) return;
+        if (!url.includes('heb.com.mx')) return;
         const method = res.request().method();
         if (method === 'GET' || method === 'HEAD') {
-          if (url.includes('consulta_facturas_uuid')) captured.uuidData = await res.json();
+          if (url.includes('/cli/api') && url.includes('consulta_facturas_uuid')) {
+            captured.uuidData = await res.json();
+          }
           return;
         }
 
-        // No fiar solo en Content-Type: algunos proxies devuelven JSON sin application/json
+        const short = url.split('?')[0].split('/').slice(-4).join('/');
+        const text = await res.text();
         let j;
         try {
-          j = await res.json();
+          j = JSON.parse(text);
         } catch {
+          if (method !== 'GET' && url.includes('/cli/api'))
+            console.log('[HEB] API', method, short, 'status', res.status(), 'no JSON', text.slice(0, 120));
           return;
         }
 
-        const short = url.split('?')[0].split('/').slice(-3).join('/');
-        if (method !== 'GET') console.log('[HEB] API', method, short);
+        if (method !== 'GET' && url.includes('/cli/api')) console.log('[HEB] API', method, short, '→', res.status());
 
-        if (jsonEsTimbradoExitoso(j)) {
-          captured.timbrado = j;
-          console.log('[HEB] Timbrado capturado (forma JSON), comp_id:', j.list_facturas[0]?.comp_id);
-        } else if (j?.result && j.result.success === false && j.result.result_message_user) {
+        if (j?.result && j.result.success === false && j.result.result_message_user) {
           captured.lastPortalMessage = j.result.result_message_user;
+        }
+
+        if (emitirClicked && jsonFacturaEmitidaOk(j)) {
+          captured.facturaEmitida = j;
+          const rows = extraerListFacturas(j);
+          console.log('[HEB] Factura emitida (JSON), comp_id:', rows?.[0]?.comp_id);
         }
 
         if (
           url.includes('consulta_factura') &&
           !url.includes('consulta_facturas_uuid') &&
-          j?.list_facturas?.[0]?.document
+          extraerListFacturas(j)?.[0]?.document
         ) {
           captured.docData = j;
           console.log('[HEB] Documento XML/PDF (consulta_factura)');
@@ -234,39 +261,42 @@ async function _generarFacturaHEB(ticketData, userData) {
     console.log('[HEB] Datos fiscales OK');
 
     // ── 10. Generar factura ───────────────────────────────────────────────────
-    const TIMBRAR_MS = 120_000;
+    const EMITIR_MS = 120_000;
     const genBtn = page.getByRole('button', { name: /generar factura/i });
     await genBtn.waitFor({ state: 'visible', timeout: 15_000 });
     console.log('[HEB] Botón Generar factura habilitado:', await genBtn.isEnabled());
 
+    emitirClicked = true;
+    traceRequests = true;
     await genBtn.click({ timeout: 20_000 });
     console.log('[HEB] Click Generar factura');
 
     let lastLog = 0;
     const tWait = Date.now();
-    while (Date.now() - tWait < TIMBRAR_MS) {
-      if (captured.timbrado?.result?.success) break;
+    while (Date.now() - tWait < EMITIR_MS) {
+      if (jsonFacturaEmitidaOk(captured.facturaEmitida)) break;
       const elapsed = Date.now() - tWait;
       if (elapsed - lastLog >= 15_000) {
         lastLog = elapsed;
-        console.log('[HEB] Esperando timbrado...', Math.round(elapsed / 1000), 's');
+        console.log('[HEB] Esperando respuesta al generar factura...', Math.round(elapsed / 1000), 's');
       }
       await page.waitForTimeout(400);
     }
+    traceRequests = false;
 
     await page.screenshot({ path: '/tmp/heb_step6.png' });
 
-    if (!captured.timbrado?.result?.success) {
+    if (!jsonFacturaEmitidaOk(captured.facturaEmitida)) {
       const hint = captured.lastPortalMessage ? ` Portal: ${captured.lastPortalMessage}` : '';
       throw new Error(
-        `HEB timeout o sin respuesta de timbrado.${hint} Revisa logs [HEB] API para la ruta real.`
+        `HEB timeout o el portal no devolvió la factura.${hint} Revisa logs [HEB] → y [HEB] API.`
       );
     }
-    const facturaInfo = captured.timbrado.list_facturas?.[0];
+    const facturaInfo = extraerListFacturas(captured.facturaEmitida)?.[0];
     if (!facturaInfo?.comp_id && !facturaInfo?.document) {
-      throw new Error('HEB timbrado sin comp_id ni documento');
+      throw new Error('HEB respuesta sin comp_id ni documento');
     }
-    console.log('[HEB] Timbrado OK comp_id:', facturaInfo.comp_id);
+    console.log('[HEB] Factura OK comp_id:', facturaInfo.comp_id);
 
     // ── 11. Capturar XML y PDF ────────────────────────────────────────────────
     const DOC_MS = 60_000;
@@ -274,7 +304,7 @@ async function _generarFacturaHEB(ticketData, userData) {
     while (Date.now() - tDoc < DOC_MS) {
       const inline = facturaInfo?.document;
       if (inline?.xml && inline?.pdf) break;
-      if (captured.docData?.list_facturas?.[0]?.document?.xml) break;
+      if (extraerListFacturas(captured.docData)?.[0]?.document?.xml) break;
       await page.waitForTimeout(500);
     }
     await page.waitForTimeout(1_000);
@@ -283,7 +313,7 @@ async function _generarFacturaHEB(ticketData, userData) {
     const doc =
       facturaInfo?.document?.xml && facturaInfo?.document?.pdf
         ? facturaInfo.document
-        : captured.docData?.list_facturas?.[0]?.document;
+        : extraerListFacturas(captured.docData)?.[0]?.document;
     console.log('[HEB] docData:', !!doc?.xml, !!doc?.pdf);
     if (!doc?.xml) throw new Error('HEB sin XML en respuesta');
     if (!doc?.pdf) throw new Error('HEB sin PDF en respuesta');
