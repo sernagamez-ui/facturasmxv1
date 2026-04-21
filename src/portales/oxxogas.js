@@ -12,6 +12,9 @@ const PORTAL_URL = 'https://facturacion.oxxogas.com';
 const DATA_DIR = resolveDataDir();
 const SESSION_FILE = path.join(DATA_DIR, 'oxxogas-session.json');
 
+/** networkidle falla en muchos portales (tráfico continuo); load + timeout largo para Railway / proxy. */
+const GOTO = { waitUntil: 'load', timeout: 120_000 };
+
 async function facturarOxxoGas({ estacion, noTicket, monto, userData, esEfectivo = false, outputDir }) {
   if (!fs.existsSync(SESSION_FILE)) {
     return { ok: false, error: 'No hay sesión guardada. Corre: node save-session.js' };
@@ -29,7 +32,7 @@ async function facturarOxxoGas({ estacion, noTicket, monto, userData, esEfectivo
   try {
     // 1. VERIFICAR SESIÓN
     console.log('[OxxoGas] Verificando sesión...');
-    await page.goto(`${PORTAL_URL}/home`, { waitUntil: 'networkidle' });
+    await page.goto(`${PORTAL_URL}/home`, GOTO);
 
     const isLoggedIn = await page.evaluate(async () => {
       try {
@@ -51,7 +54,7 @@ async function facturarOxxoGas({ estacion, noTicket, monto, userData, esEfectivo
     console.log(`[OxxoGas] RFC ID: ${rfcId}`);
 
     // 3. NAVEGAR A FACTURAR
-    await page.goto(`${PORTAL_URL}/facturacion/facturar`, { waitUntil: 'networkidle' });
+    await page.goto(`${PORTAL_URL}/facturacion/facturar`, GOTO);
 
     const estacionNorm = estacion.replace(/^E(\d+)$/, (_, n) => 'E' + n.padStart(5, '0'));
 
