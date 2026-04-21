@@ -230,8 +230,8 @@ async function _generarFacturaHEB(ticketData, userData) {
     if (!doc?.pdf) throw new Error('HEB sin PDF en respuesta');
 
     return {
-      xml:   Buffer.from(doc.xml, 'base64'),
-      pdf:   Buffer.from(doc.pdf, 'base64'),
+      xml:   bufferFromPortalPayload(doc.xml, 'xml'),
+      pdf:   bufferFromPortalPayload(doc.pdf, 'pdf'),
       uuid:  facturaInfo.uuid ?? captured.uuidData?.facturas?.[0]?.uuid,
       folio: String(facturaInfo.document?.folio ?? ''),
       serie: facturaInfo.document?.serie ?? '',
@@ -257,6 +257,30 @@ async function generarFacturaHEB(ticketData, userData) {
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
+
+/**
+ * El portal puede devolver XML/PDF en base64 o (en algunos casos) XML como texto.
+ */
+function bufferFromPortalPayload(raw, kind) {
+  if (Buffer.isBuffer(raw)) return raw;
+  if (raw == null || raw === '') throw new Error(`HEB sin ${kind} en respuesta`);
+  const s = String(raw).trim();
+
+  if (kind === 'xml' && (s.startsWith('<?xml') || /^<[a-zA-Z]/.test(s))) {
+    return Buffer.from(s, 'utf8');
+  }
+
+  const fromB64 = Buffer.from(s, 'base64');
+  if (kind === 'pdf') {
+    if (fromB64.length >= 4 && fromB64.slice(0, 4).toString('latin1') === '%PDF') return fromB64;
+    throw new Error('HEB PDF no decodificable (no es PDF válido)');
+  }
+
+  const head = fromB64.slice(0, Math.min(400, fromB64.length)).toString('utf8');
+  if (head.includes('<?xml') || head.includes('<cfdi') || head.includes('cfdi:')) return fromB64;
+  if (s.startsWith('<')) return Buffer.from(s, 'utf8');
+  return fromB64;
+}
 
 function normalizarFecha(fecha) {
   const s = String(fecha).trim();

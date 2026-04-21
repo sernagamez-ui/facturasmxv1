@@ -3,8 +3,7 @@
  *
  * Diferencias clave vs WhatsApp:
  * - Descarga la imagen vía Telegram API (no Meta)
- * - Envía PDF con ctx.replyWithDocument() (no uploadMedia)
- * - XML va al email del usuario (igual que antes)
+ * - El servidor envía PDF y XML con sendDocument (stream); email XML es opcional (SMTP)
  * - Los portales petro7.js y oxxogas.js NO cambian — retornan pdfPath/xmlPath igual
  */
 
@@ -108,6 +107,11 @@ async function handleTicket(ctx, fileId, userData) {
   if (resultado.ok) {
     _guardarEnHistorial(userId, ticketData, resultado, userData);
     totalParaUi = ticketData.total ?? ticketData.monto ?? null;
+    if (resultado.xmlPath) {
+      enviarXmlPorEmail(userData.email, resultado.xmlPath, resultado.uuid).catch((e) =>
+        console.warn('[ticketHandler] XML email:', e.message)
+      );
+    }
   }
 
   // ── 7. Construir mensaje de respuesta ────────────────────────────────────
@@ -334,8 +338,12 @@ function _mensajeExito(ticketData, resultado, userData, xmlEnviado) {
       : `ℹ️ Régimen 605: este tipo de gasto no es deducible en tu declaración anual.\n\n`;
   }
 
-  msg += `📄 PDF adjunto arriba\n`;
-  if (xmlEnviado) msg += `📧 XML enviado a \`${userData.email}\``;
+  if (resultado.pdfPath && resultado.xmlPath) {
+    msg += `📎 Te envío PDF y XML en mensajes separados.\n`;
+  } else if (resultado.pdfPath) {
+    msg += `📄 Te envío el PDF en el siguiente mensaje.\n`;
+  }
+  if (xmlEnviado) msg += `📧 XML enviado a \`${userData.email}\`\n`;
   else if (resultado.envioPorCorreo) msg += `📧 El portal lo enviará a tu correo en breve`;
 
   return msg;

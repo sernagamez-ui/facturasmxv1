@@ -2,6 +2,7 @@
  * facturaRouter.js — Orquestador de facturación
  */
 
+const fs   = require('fs');
 const os   = require('os');
 const path = require('path');
 
@@ -68,9 +69,13 @@ function expand7ElevenNoTicketCandidates(rawList) {
   return [...set];
 }
 
-async function procesarFactura(ticketData, userData, phone) {
+async function procesarFactura(ticketData, userData, phone, outputDirOverride) {
   const { comercio } = ticketData;
-  const outputDir = path.join(os.tmpdir(), 'cotas', phone, Date.now().toString());
+  const outputDir =
+    outputDirOverride && String(outputDirOverride).trim()
+      ? String(outputDirOverride).trim()
+      : path.join(os.tmpdir(), 'cotas', String(phone), Date.now().toString());
+  fs.mkdirSync(outputDir, { recursive: true });
 
   let resultado;
 
@@ -193,10 +198,6 @@ async function procesarFactura(ticketData, userData, phone) {
     } else if (comercio === 'heb') {
       validar(ticketData, ['sucursal', 'noTicket', 'fecha', 'total'], 'HEB');
       const { xml, pdf, uuid, folio, serie } = await generarFacturaHEB(ticketData, userData);
-
-      const fs   = require('fs');
-      const mkdirp = (dir) => fs.mkdirSync(dir, { recursive: true });
-      mkdirp(outputDir);
 
       const xmlPath = path.join(outputDir, `heb_${ticketData.noTicket}.xml`);
       const pdfPath = path.join(outputDir, `heb_${ticketData.noTicket}.pdf`);

@@ -344,39 +344,59 @@ bot.on('photo', async (ctx) => {
 // ── Enviar resultado con info fiscal ─────────────────────────────────────────
 
 async function _enviarResultado(chatId, resultado, ticketData, userData, usoCfdi) {
-  try {
-    let msg = resultado.mensajeBot || '✅ Factura procesada.';
+  let msg = resultado.mensajeBot || '✅ Factura procesada.';
 
-    // Agregar info fiscal (solo éxito; en error el texto puede traer URLs/puertos que rompen Markdown)
-    const total = resultado.totalParaUi ?? ticketData.total ?? ticketData.monto;
-    if (resultado.ok === true && total && userData.regimen) {
-      const fiscal = mensajeFiscal({
+  const total = resultado.totalParaUi ?? ticketData.total ?? ticketData.monto;
+  if (resultado.ok === true && total && userData.regimen) {
+    try {
+      msg += mensajeFiscal({
         comercio:   ticketData.comercio,
         total,
         regimen:    userData.regimen,
         metodoPago: ticketData.metodoPago || 'tarjeta',
         usoCfdi:    usoCfdi || 'G03',
       });
-      msg += fiscal;
+    } catch (e) {
+      console.error('[server] mensajeFiscal:', e.message);
     }
+  }
 
-    const sendOpts = resultado.ok === true ? { parse_mode: 'Markdown' } : {};
+  const sendOpts = resultado.ok === true ? { parse_mode: 'Markdown' } : {};
+  try {
     await bot.telegram.sendMessage(chatId, msg, sendOpts);
+  } catch (err) {
+    console.error('[server] sendMessage:', err.message);
+    const desc = String(err.response?.description || err.message || '');
+    if (/parse entities|can't parse/i.test(desc)) {
+      const plain = msg.replace(/\*+/g, '').replace(/_+/g, '').replace(/`/g, '');
+      await bot.telegram.sendMessage(chatId, plain).catch((e2) =>
+        console.error('[server] sendMessage plain:', e2.message)
+      );
+    }
+  }
 
-    if (resultado.pdfPath && fs.existsSync(resultado.pdfPath)) {
-      await bot.telegram.sendDocument(chatId,
-        { source: resultado.pdfPath, filename: `factura_${Date.now()}.pdf` },
+  // PDF/XML siempre: antes fallaba todo el bloque si Markdown rompía y no enviaba documentos
+  if (resultado.pdfPath && fs.existsSync(resultado.pdfPath)) {
+    try {
+      await bot.telegram.sendDocument(
+        chatId,
+        { source: fs.createReadStream(resultado.pdfPath), filename: `factura_${Date.now()}.pdf` },
         { caption: '📄 Tu factura en PDF' }
       );
+    } catch (err) {
+      console.error('[server] sendDocument PDF:', err.message);
     }
-    if (resultado.xmlPath && fs.existsSync(resultado.xmlPath)) {
-      await bot.telegram.sendDocument(chatId,
-        { source: resultado.xmlPath, filename: `factura_${Date.now()}.xml` },
-        { caption: '🗂 Tu factura en XML' }
+  }
+  if (resultado.xmlPath && fs.existsSync(resultado.xmlPath)) {
+    try {
+      await bot.telegram.sendDocument(
+        chatId,
+        { source: fs.createReadStream(resultado.xmlPath), filename: `factura_${Date.now()}.xml` },
+        { caption: '🗂 Tu factura en XML (CFDI)' }
       );
+    } catch (err) {
+      console.error('[server] sendDocument XML:', err.message);
     }
-  } catch (err) {
-    console.error('[server] Error enviando resultado:', err.message);
   }
 }
 
