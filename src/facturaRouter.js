@@ -332,31 +332,55 @@ async function procesarFactura(ticketData, userData, phone, outputDirOverride) {
     // ── Grupo Galería (Origon CDC): Carl's Jr., IHOP, BWW, etc. ───────────
     } else if (ORIGON_CDC_BRANDS.has(comercio)) {
       const branchCode = ticketData.branchCode ?? ticketData.tienda;
-      const td = { ...ticketData, branchCode };
-      validar(td, ['branchCode', 'noTicket', 'fecha', 'total'], ORIGON_CDC_CONFIG[comercio]?.label || comercio);
-
-      resultado = await facturarOrigonCdc({
-        comercio,
-        branchCode: String(td.branchCode).trim(),
-        noTicket: String(td.noTicket).trim(),
-        fecha: td.fecha,
-        total: Number(td.total),
-        userData,
-        outputDir,
-      });
+      const sucursalNombre = ticketData.sucursalNombre;
+      validar(ticketData, ['noTicket', 'fecha', 'total'], ORIGON_CDC_CONFIG[comercio]?.label || comercio);
+      const bStr = String(branchCode ?? '').trim();
+      const nStr = String(sucursalNombre ?? '').trim();
+      if (!bStr && !nStr) {
+        resultado = {
+          ok: false,
+          comercio,
+          error: 'faltan_sucursal',
+          userMessage:
+            '⚠️ Hace falta *sucursal* para facturar: el número (en "Datos para facturar") o al menos el nombre de la tienda (ej. San Pedro) en el ticket. Manda otra foto mostrando encabezado o esa sección.',
+        };
+      } else {
+        resultado = await facturarOrigonCdc({
+          comercio,
+          branchCode: bStr,
+          sucursalNombre: nStr || undefined,
+          noTicket: String(ticketData.noTicket).trim(),
+          fecha: ticketData.fecha,
+          total: Number(ticketData.total),
+          userData,
+          outputDir,
+        });
+      }
 
       if (!resultado.ok) {
-        const errMap = {
-          ticket_invalido: '📋 El portal no reconoce este ticket. Verifica sucursal, folio, fecha y total (deben coincidir con el ticket).',
-          preview_error: '⚠️ Los datos fiscales o el ticket no pasaron la validación del portal.',
-          emision_error: '⚠️ No se pudo timbrar el CFDI. Intenta de nuevo en unos minutos.',
-          portal_forbidden:
-            '🚫 El portal de facturación bloqueó la conexión desde el servidor (403). Si usas hosting en la nube, puede hacer falta proxy en México o ejecutar Cotas en red local.',
-          proxy_auth:
-            '🔐 El proxy respondió 407. Revisa usuario y contraseña en PROXY_URL_ROTATING.',
-        };
-        resultado.userMessage =
-          errMap[resultado.error] || `⚠️ ${resultado.mensaje || resultado.error || 'Error al facturar'}`;
+        if (resultado.error === 'faltan_sucursal') {
+          /* userMessage already set */
+        } else {
+          const portal = resultado.mensaje
+            ? `📋 *Portal:* ${String(resultado.mensaje).replace(/\*/g, '')}\n\n`
+            : '';
+          const sugerenciaMap = {
+            ticket_invalido:
+              '💡 Revisa *sucursal* (código, ej. 15 = San Pedro), *folio* solo dígitos (3,451,112 → 3451112), *fecha* y *TOTAL* con IVA (no el neto).',
+            sucursal_desconocida:
+              '💡 Incluye en la foto el encabezado con nombre de tienda o "Datos para facturar" con el número de sucursal.',
+            preview_error: '💡 Los datos fiscales o el ticket no pasaron la validación del portal.',
+            emision_error: '💡 No se pudo timbrar. Intenta de nuevo en unos minutos.',
+            portal_forbidden:
+              '💡 El portal devolvió 403; en hosting a veces hace falta proxy en MX o red local.',
+            proxy_auth: '💡 Revisa PROXY_URL_ROTATING (proxy 407).',
+            origon_error: `💡 ${String(resultado.mensaje || 'Error al contactar al portal')}`,
+          };
+          const sugerencia =
+            sugerenciaMap[resultado.error] ||
+            `💡 ${String(resultado.mensaje || resultado.error || 'Error al facturar')}`;
+          resultado.userMessage = portal + sugerencia;
+        }
       }
 
     // ── McDonald's México ────────────────────────────────────────────────

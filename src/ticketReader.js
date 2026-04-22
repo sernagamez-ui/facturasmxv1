@@ -488,30 +488,30 @@ function promptOrigonCdc(marcaKey) {
   const nombreMarca = labels[marcaKey] || marcaKey;
   const anioActual = new Date().getFullYear();
 
-  return `Analiza este ticket de ${nombreMarca} (Grupo Galería) y extrae los datos para facturar electrónicamente.
+  return `Analiza este ticket de ${nombreMarca} (Grupo Galería) y extrae los datos para el portal de facturación (Origon / grupogaleria.com).
 
-Suele existir una sección "Datos para facturar" o similar con:
-- Sucursal / sucursal / branch (número corto, a veces 2–4 dígitos)
-- Ticket / folio / número de ticket
-- Fecha de compra
-- Total pagado
+En el encabezado a veces dice la tienda en texto, ej. "San Pedro", "Cumbres", "Valle Oriente". Eso va en "sucursalNombre" (ayuda a resolver el código de sucursal en el sistema).
+
+Números clave (NO confundir):
+- **FOLIO / TICKET#**: suelen ser 6–7 dígitos, a veces con comas o puntos (ej. 3,451,112 = siete dígitos: 3451112). Cópialos como solo dígitos en "noTicket" (sin comas).
+- **Código de sucursal (branchCode)**: en la sección "Datos para facturar" o "Suc" puede aparecer un número CORTO (1–3 dígitos, ej. 15). NO es el folio, NO el ID de encuesta, NO "San Pedro" escrito. Si en la foto no ves un número de sucursal, pon "branchCode": null y rellena bien "sucursalNombre" con el nombre de la tienda.
+- **TOTAL**: la línea TOTAL con IVA (ej. $55.00), NUNCA el "Total Neto" sin IVA.
 
 CAMPOS EN JSON (obligatorios):
 {
   "encontrado": true,
   "comercio": "${marcaKey}",
-  "branchCode": "código de sucursal SOLO dígitos como string (ej. \\"15\\") — busca 'Sucursal', 'Suc', 'Branch'",
-  "noTicket": "número de ticket o folio para facturación (dígitos; si hay letras, cópialas tal cual)",
+  "branchCode": "solo dígitos del código SUC/tienda si aparece, o null",
+  "sucursalNombre": "texto de la sucursal si aparece, ej. San Pedro, o null",
+  "noTicket": "folio TICKET# solo como dígitos, sin comas",
   "fecha": "YYYY-MM-DD",
-  "total": número decimal (total a pagar con IVA, el que pide el portal),
+  "total": número decimal (TOTAL con IVA),
   "metodoPago": "efectivo" o "tarjeta" o null
 }
 
 REGLAS:
-- branchCode y noTicket NO son intercambiables. La sucursal es el número CORTO de tienda; el ticket es el folio largo/distinto.
-- Lee cada dígito con cuidado (3 vs 8, 1 vs 7, 6 vs 5).
-- Si la fecha viene DD/MM/AAAA o DD-MM-AAAA, convierte a YYYY-MM-DD. Año actual ${anioActual}.
-- total: monto FINAL de la compra (con IVA), no subtotal.
+- branchCode (si existe) y noTicket NUNCA intercambiar: el folio es el número grande del apartado FOLIO/TICKET.
+- Año: ${anioActual} si aplica. El ticket "QR no encontrado" en logs es normal; este ticket a veces no trae QR.
 
 Responde SOLO con el JSON, sin texto adicional.`;
 }

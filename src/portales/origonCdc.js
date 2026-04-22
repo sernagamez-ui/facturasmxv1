@@ -91,6 +91,86 @@ function extraerUuidXml(xml) {
   return m ? m[1].toUpperCase() : null;
 }
 
+function soloDigitos(s) {
+  return String(s || '').replace(/\D/g, '');
+}
+
+function normalizarMonto(n) {
+  const x = Number(n);
+  if (Number.isNaN(x) || x < 0) return null;
+  return Math.round(x * 100) / 100;
+}
+
+function normalizarTextoSuc(s) {
+  return String(s || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** Coincide "San Pedro" / nombre de ticket con el catálogo de sucursales del portal. */
+function resolverCodePorNombreSucursal(hint, branches) {
+  if (!hint || !Array.isArray(branches) || !branches.length) return null;
+  const stop = new Set([
+    "carl's", "carls", "jr", "rest", "restaurante", "restaurant", "ihop", "bww", "buffalo", "wings", "cjs", "galeria", "galería",
+  ]);
+  const h = normalizarTextoSuc(hint);
+  const palabras = h.split(' ').filter((w) => w.length > 1 && !stop.has(w));
+  for (const b of branches) {
+    if (b && b.active === false) continue;
+    const n = normalizarTextoSuc(b.name || '');
+    for (const p of palabras) {
+      if (p.length >= 3 && n.includes(p)) return String(b.code);
+    }
+  }
+  for (const b of branches) {
+    if (b && b.active === false) continue;
+    const n = normalizarTextoSuc(b.name || '');
+    if (h && n && (h.includes(n) || n.includes(h))) return String(b.code);
+  }
+  return null;
+}
+
+function codesDeSucursalCandidatos(rawBranch, sucursalNombre, branches) {
+  const out = [];
+  const seen = new Set();
+  const push = (c) => {
+    const s = c == null ? '' : String(c).trim();
+    if (!s || seen.has(s)) return;
+    if (!branches.some((b) => String(b.code) === s)) return;
+    seen.add(s);
+    out.push(s);
+  };
+
+  const soloB = soloDigitos(rawBranch);
+  // 1–3 dígitos: típico código tienda. ≥5 a menudo es folio mal colocado.
+  if (soloB && soloB.length >= 1 && soloB.length <= 3) push(soloB);
+
+  const n1 = resolverCodePorNombreSucursal(sucursalNombre, branches);
+  if (n1) push(n1);
+  if (sucursalNombre) {
+    const h = normalizarTextoSuc(sucursalNombre);
+    for (const b of branches) {
+      if (b && b.active === false) continue;
+      const nn = normalizarTextoSuc(b.name || '');
+      if (h && nn && (h.includes(nn) || nn.includes(h)) && b.code != null) push(String(b.code));
+    }
+  }
+  return out;
+}
+
+async function getBranchList(baseUrl, headers, issuerTaxId) {
+  const { data } = await axios.post(
+    `${baseUrl}/Selfservice/GetBranchListByIssuer`,
+    { IssuerTaxId: issuerTaxId, RegionCode: '' },
+    origonHttp({ headers, timeout: 60000 })
+  );
+  if (data?.hasError) throw new Error(data.errorMessage || 'GetBranchListByIssuer');
+  return data.model || [];
+}
+
 async function getIssuerTaxId(baseUrl) {
   const { data } = await axios.get(
     `${baseUrl}/Selfservice/GetSelfserviceSetup`,
@@ -140,7 +220,8 @@ function buildCustomerData(userData) {
 /**
  * @param {object} p
  * @param {string} p.comercio — carlsjr | ihop | bww
- * @param {string} p.branchCode — código de sucursal (ej. "15")
+ * @param {string} p.branchCode — código de sucursal (ej. "15"); puede ir vacío si hay sucursalNombre
+ * @param {string} [p.sucursalNombre] — nombre de tienda en el ticket, ej. "San Pedro" (se cruza con catálogo del portal)
  * @param {string} p.noTicket — folio del ticket
  * @param {string} p.fecha — YYYY-MM-DD
  * @param {number} p.total — monto total
@@ -150,6 +231,7 @@ function buildCustomerData(userData) {
 async function facturarOrigonCdc({
   comercio,
   branchCode,
+  sucursalNombre,
   noTicket,
   fecha,
   total,
@@ -170,12 +252,65 @@ async function facturarOrigonCdc({
 
   try {
     const issuerTaxId = await getIssuerTaxId(baseUrl);
+    const branches = await getBranchList(baseUrl, headers, issuerTaxId);
+    const ticketNum = soloDigitos(noTicket);
+    if (!ticketNum) {
+      return { ok: false, error: 'ticket_invalido', mensaje: 'Folio de ticket vacío o ilegible (se necesitan dígitos del TICKET#).' };
+    }
+    const monto = normalizarMonto(total);
+    if (monto == null) {
+      return { ok: false, error: 'ticket_invalido', mensaje: 'Total de ticket no válido.' };
+    }
+    const purchaseDate = fechaToOrigonUTC(fecha);
+    const candidates = codesDeSucursalCandidatos(branchCode, sucursalNombre, branches);
+    if (candidates.length === 0) {
+      return {
+        ok: false,
+        error: 'sucursal_desconocida',
+        mensaje:
+          'No se pudo mapear la sucursal. En el ticket debe verse el *número* de sucursal (en "Datos para facturar") o un nombre de tienda claro (ej. San Pedro) junto con el FOLIO y el TOTAL con IVA.',
+      };
+    }
+
+    let branchUsado = null;
+    let vd = null;
+    let lastMsg = '';
+    for (const bc of candidates) {
+      const ticketPayload = {
+        BranchCode: bc,
+        TicketNumber: ticketNum,
+        PurchaseDate: purchaseDate,
+        PurchaseAmount: monto,
+      };
+      const valRes = await axios.post(
+        `${baseUrl}/Selfservice/ValidateTicketData`,
+        ticketPayload,
+        origonHttp({ headers, timeout: 45000 })
+      );
+      vd = valRes.data;
+      lastMsg = String(vd?.errorMessage || '');
+      console.log(
+        `[OrigonCDC/${comercio}] ValidateTicketData BranchCode=${bc} TicketNumber=${ticketNum} ` +
+        `monto=${monto} hasError=${vd?.hasError} msg=${lastMsg.slice(0, 200)}`
+      );
+      if (!vd?.hasError || esMensajeYaFacturado(vd.errorMessage)) {
+        branchUsado = bc;
+        break;
+      }
+    }
+    if (!branchUsado) {
+      return {
+        ok: false,
+        error: 'ticket_invalido',
+        mensaje: lastMsg || 'El portal no validó la combinación sucursal / folio / fecha / monto.',
+      };
+    }
 
     const ticketPayload = {
-      BranchCode: String(branchCode).trim(),
-      TicketNumber: String(noTicket).trim(),
-      PurchaseDate: fechaToOrigonUTC(fecha),
-      PurchaseAmount: Number(total),
+      BranchCode: branchUsado,
+      TicketNumber: ticketNum,
+      PurchaseDate: purchaseDate,
+      PurchaseAmount: monto,
     };
 
     const issueBase = {
@@ -185,21 +320,6 @@ async function facturarOrigonCdc({
       VersionCFDI: CFDI_VERSION,
       CustomerData: buildCustomerData(userData),
     };
-
-    const valRes = await axios.post(
-      `${baseUrl}/Selfservice/ValidateTicketData`,
-      ticketPayload,
-      origonHttp({ headers, timeout: 45000 })
-    );
-    const vd = valRes.data;
-    if (vd?.hasError && !esMensajeYaFacturado(vd.errorMessage)) {
-      const msg = vd.errorMessage || 'Ticket no válido';
-      return {
-        ok: false,
-        error: 'ticket_invalido',
-        mensaje: msg,
-      };
-    }
 
     const preview = await axios.post(
       `${baseUrl}/Selfservice/GetDetailIssue`,
