@@ -69,7 +69,7 @@ function looksLikeHebTimbradoJson(j, u) {
   if (!j || typeof j !== 'object' || j.result == null) return false;
   const r = j.result;
   if (typeof r !== 'object' || r === null) return false;
-  if (j.list_facturas?.[0]?.document?.xml) return false;
+  // No descartar si ya viene el XML: algunos despliegues regresan timbrado + documento en un solo JSON.
   const ul = u.toLowerCase();
   if (ul.includes('timb') || ul.includes('generar_f') || ul.includes('emision_cfdi')) return true;
   if (j.list_facturas?.[0]?.comp_id) return true;
@@ -101,11 +101,14 @@ function waitForHebTimbradoResponse(page, timeoutMs) {
       let j = null;
       try {
         const u = res.url();
-        if (!u.includes('facturacion.heb.com.mx') || !u.toLowerCase().includes('/api/')) return;
+        if (!u.includes('facturacion.heb.com.mx')) return;
+        if (!u.toLowerCase().includes('api')) return;
         const req = res.request();
         if (isExcludedHebPreTimbrarUrl(u.toLowerCase(), req)) return;
+        const st = res.status();
+        if (st < 200 || st >= 500) return;
         const ct = (res.headers()['content-type'] || '').toLowerCase();
-        if (!ct.includes('json') || res.status() >= 500) return;
+        if (ct && !ct.includes('json') && !ct.includes('text')) return;
         j = await res.json();
         if (!looksLikeHebTimbradoJson(j, u)) return;
         done = true;
@@ -119,6 +122,89 @@ function waitForHebTimbradoResponse(page, timeoutMs) {
 
     page.on('response', onResponse);
   });
+}
+
+function isExcludedHebForDocumentoUrl(u, req) {
+  if (req.method() !== 'POST') return true;
+  const l = u.toLowerCase();
+  for (const ex of [
+    'int_store_sel',
+    'int_ticket_sel',
+    'consulta_ticket_forma_pago',
+    'consulta_facturas_uuid',
+  ]) {
+    if (l.includes(ex)) return true;
+  }
+  return false;
+}
+
+function looksLikeHebDocumentoJson(j) {
+  return !!j?.list_facturas?.[0]?.document?.xml;
+}
+
+/**
+ * Escucha un JSON con list_facturas[].document.xml (misma lógica que el timbrado, sin
+ * page.waitForResponse — evita TimeoutError de Playwright en consulta de documento).
+ * Regístrala antes de “Generar factura” y úsala después del timbrado, o llama a abort() si
+ * el timbrado ya trae XML+PDF.
+ * @param {import('playwright').Page} page
+ * @param {number} timeoutMs
+ * @returns {{ promise: Promise<Record<string, unknown>>, abort: () => void }}
+ */
+function startHebDocumentoWait(page, timeoutMs) {
+  let done = false;
+  /** @type {((res: import('playwright').Response) => Promise<void>) | null} */
+  let onResponse = null;
+  /** @type {ReturnType<typeof setTimeout> | undefined} */
+  let tid;
+  /** @type {((j: Record<string, unknown> | null) => void) | null} */
+  let settle = null;
+  const promise = new Promise((resolve, reject) => {
+    settle = (j) => {
+      if (done) return;
+      done = true;
+      if (onResponse) page.removeListener('response', onResponse);
+      if (tid) clearTimeout(tid);
+      if (j) resolve(j);
+      else resolve(null);
+    };
+    onResponse = async (res) => {
+      if (done) return;
+      try {
+        const u = res.url();
+        if (!u.includes('facturacion.heb.com.mx')) return;
+        if (!u.toLowerCase().includes('api')) return;
+        const req = res.request();
+        if (isExcludedHebForDocumentoUrl(u, req)) return;
+        const st = res.status();
+        if (st < 200 || st >= 500) return;
+        const ct = (res.headers()['content-type'] || '').toLowerCase();
+        if (ct && !ct.includes('json') && !ct.includes('text')) return;
+        const j = await res.json();
+        if (!looksLikeHebDocumentoJson(j)) return;
+        settle(/** @type {Record<string, unknown>} */ (j));
+      } catch {
+        // body no-JSON o consumido
+      }
+    };
+    page.on('response', onResponse);
+    tid = setTimeout(() => {
+      if (done) return;
+      if (onResponse) page.removeListener('response', onResponse);
+      done = true;
+      reject(
+        new Error(
+          `HEB timeout: sin API con XML de factura en ${timeoutMs / 1000}s. HEB_DEBUG_API=1, heb_step6.png, HEB_HEADFUL=1`
+        )
+      );
+    }, timeoutMs);
+  });
+  return {
+    promise,
+    abort() {
+      if (settle) settle(null);
+    },
+  };
 }
 
 async function _generarFacturaHEB(ticketData, userData) {
@@ -140,6 +226,7 @@ async function _generarFacturaHEB(ticketData, userData) {
       'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
   });
 
+  let documentWait;
   try {
     fs.mkdirSync(HEB_SCREENSHOT_DIR, { recursive: true });
 
@@ -303,18 +390,9 @@ async function _generarFacturaHEB(ticketData, userData) {
         }
       });
 
-    // ── 10. Timbrar: promesas ANTES del click; acepta URLs nuevas o JSON con list_facturas/comp_id ──
-    const esConsultaDocumento = (r) => {
-      const u = r.url();
-      return (
-        u.includes('consulta_factura') && !u.includes('uuid') && !u.includes('consulta_facturas_uuid')
-      );
-    };
-
+    // ── 10. Timbrar + documento: escuchar ambos ANTES del click (otra request con XML justo al timbrar)
+    documentWait = startHebDocumentoWait(page, 90_000);
     const timbrarPromise = waitForHebTimbradoResponse(page, API_WAIT_MS);
-    const consultaFacturaPromise = page
-      .waitForResponse(esConsultaDocumento, { timeout: API_WAIT_MS })
-      .catch(() => null);
 
     const btnGen = page.getByRole('button', { name: /generar factura/i });
     await btnGen.waitFor({ state: 'visible', timeout: 15_000 });
@@ -352,10 +430,25 @@ async function _generarFacturaHEB(ticketData, userData) {
     if (!facturaInfo?.comp_id) throw new Error('HEB timbrado sin comp_id');
     console.log('[HEB] Timbrado OK comp_id:', facturaInfo.comp_id);
 
-    // ── 11. Documento (XML/PDF) ──
-    await page.waitForTimeout(2_000);
-    const docRes = await consultaFacturaPromise;
-    if (docRes) captured.docData = await docRes.json().catch(() => null);
+    // ── 11. Documento (XML/PDF) — en el JSON de timbrado o en request aparte
+    const d0 = captured.timbrado?.list_facturas?.[0]?.document;
+    if (d0?.xml && d0?.pdf) {
+      documentWait.abort();
+      captured.docData = { list_facturas: captured.timbrado.list_facturas };
+    } else {
+      try {
+        const docJ = await documentWait.promise;
+        if (docJ) {
+          captured.docData = docJ;
+        } else {
+          await page.screenshot({ path: hebScreenshotPath('heb_step6b_nodoc.png') });
+          throw new Error('HEB: sin documento (XML) tras el timbrado. HEB_DEBUG_API=1');
+        }
+      } catch (e) {
+        await page.screenshot({ path: hebScreenshotPath('heb_step6b_nodoc.png') });
+        throw e;
+      }
+    }
     await page.screenshot({ path: hebScreenshotPath('heb_step7.png') });
     console.log('[HEB] docData:', !!captured.docData?.list_facturas?.length);
 
@@ -371,6 +464,11 @@ async function _generarFacturaHEB(ticketData, userData) {
       serie: facturaInfo.document?.serie ?? '',
     };
   } finally {
+    try {
+      if (documentWait) documentWait.abort();
+    } catch {
+      // noop
+    }
     await browser.close();
   }
 }
