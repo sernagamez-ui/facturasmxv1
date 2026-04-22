@@ -17,7 +17,7 @@ const os      = require('os');
 const cron    = require('node-cron');
 
 const db                                = require('./src/db');
-const { initEmailInbound }              = require('./src/emailInbound');
+const { createEmailInboundHandler }     = require('./src/webhooks/emailInbound');
 const { handleTicket, handleRetryAlsea, handleRetryPetro7Estacion } = require('./src/ticketHandler');
 const { enqueue, stats: queueStats }    = require('./src/facturaQueue');
 const { leerTicket }                    = require('./src/ticketReader');
@@ -25,7 +25,6 @@ const { clasificarGasto, determinarUsoCfdi, mensajeFiscal, calcularDeducibilidad
 const { verificarUsoCfdi, generarBotonesUsoCfdi, guardarEstadoEsperandoUsoCfdi, recuperarEstadoUsoCfdi } = require('./src/usoCfdiFlow');
 
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
-initEmailInbound(bot);
 const app = express();
 const IS_RAILWAY = Boolean(process.env.RAILWAY_PROJECT_ID || process.env.RAILWAY_ENVIRONMENT_ID);
 /** Solo true después de `bot.launch()` (polling). En webhook no hay launch → no llamar `bot.stop()`. */
@@ -496,6 +495,11 @@ cron.schedule('0 9 1 * *', async () => {
 
 if (process.env.WEBHOOK_URL) {
   // Modo webhook (Railway / producción)
+  app.post(
+    '/webhooks/email',
+    express.json({ limit: '50mb' }),
+    createEmailInboundHandler(bot, db)
+  );
   app.use(express.json());
   app.use(bot.webhookCallback('/webhook'));
   const PORT = process.env.PORT || 3000;

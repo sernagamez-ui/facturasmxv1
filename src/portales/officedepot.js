@@ -15,7 +15,7 @@
 //   9. POST /invorch/invoicingOrch/emitInvoice      (emite CFDI — llega al email)
 //
 // emitInvoice.email: un solo campo. Usamos {telegramId}@factural.mx para que el CFDI
-// caiga en el buzón IMAP y emailInbound reenvíe XML/PDF al chat y al correo personal.
+// llegue por correo a Cloudflare → Worker POST /webhooks/email → XML/PDF al chat.
 
 const axios = require('axios');
 
