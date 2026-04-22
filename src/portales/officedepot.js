@@ -46,6 +46,37 @@ function normalizeItu(raw) {
   return clean.slice(0, 25) + 'POSA' + clean.slice(29);
 }
 
+/** QR de facturación: #/generaF/{b64 ITU}/{b64 monto} */
+const FACTURACION_QR_RE =
+  /^https?:\/\/facturacion\.officedepot\.com\.mx\/#\/generaF\/([^/]+)\/([^/?#\s]+)/i;
+
+/**
+ * Si el texto del QR es la URL de generación de factura, decodifica ITU y monto (prioritario vs Vision).
+ * @returns {{ itu: string, amount: number, amountText: string } | null}
+ */
+function parseFacturacionQrUrl(qrString) {
+  if (!qrString || typeof qrString !== 'string') return null;
+  const trimmed = String(qrString).trim();
+  const m = trimmed.match(FACTURACION_QR_RE);
+  if (!m) return null;
+  let ituRaw;
+  let amountText;
+  try {
+    ituRaw = Buffer.from(m[1], 'base64').toString('utf8');
+    amountText = Buffer.from(m[2], 'base64').toString('utf8');
+  } catch {
+    return null;
+  }
+  ituRaw = String(ituRaw).trim();
+  amountText = String(amountText).trim();
+  if (!ituRaw) return null;
+  const itu = normalizeItu(ituRaw);
+  const amount = parseFloat(amountText.replace(',', '.'));
+  if (Number.isNaN(amount)) return null;
+  log(`ITU extraído del QR: ${itu} monto: ${amountText}`);
+  return { itu, amount, amountText };
+}
+
 /**
  * Mapea datos del onboarding Cotas al payload Office Depot.
  * @param {object} userData — rfc, nombre, cp, regimen, email (personal; no se usa en portal si pasas portalEmail)
@@ -295,4 +326,4 @@ async function facturar({ ticket, usuario, emailPersonal }) {
   };
 }
 
-module.exports = { facturar, normalizeItu, buildUsuario };
+module.exports = { facturar, normalizeItu, buildUsuario, parseFacturacionQrUrl };

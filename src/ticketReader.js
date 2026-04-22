@@ -1,5 +1,5 @@
 /**
- * ticketReader.js — Extracción de datos de tickets con Claude Vision + QR reader
+ * ticketReader.js — Extracción de tickets: siempre lector QR primero, luego Claude Vision
  * Modelo default: claude-haiku-4-5-20251001 (rápido)
  * Modelo Alsea:   claude-sonnet-4-6 (preciso — sin QR, dígitos exactos requeridos)
  */
@@ -14,19 +14,23 @@ const MODEL_SONNET = 'claude-sonnet-4-6';           // Alsea: sin QR, dígitos d
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 const { ORIGON_CDC_BRANDS } = require('./portales/origonCdc');
-const { normalizeItu: normalizeItuOfficeDepot } = require('./portales/officedepot');
+const {
+  normalizeItu: normalizeItuOfficeDepot,
+  parseFacturacionQrUrl: parseOfficeDepotFacturacionQr,
+} = require('./portales/officedepot');
 
 /**
  * Lee un ticket desde un buffer de imagen.
- * Para OXXO Gas: intenta leer el QR primero (más rápido y preciso).
- * Para otros: usa Claude Vision directamente.
+ * Orden fijo: (1) intentar leer QR en la imagen; (2) si el texto coincide con un
+ * patrón conocido (OXXO Gas, Petro 7, Office Depot), devolver esos datos; (3) si
+ * no hay QR, o hay QR con formato no soportado aún, usar Vision para comercio y campos.
  *
  * @param {Buffer} imageBuffer
  * @param {string} mimeType
  * @returns {object} datos del ticket + campo `comercio`
  */
 async function leerTicket(imageBuffer, mimeType = 'image/jpeg') {
-  // ─── Paso 1: Intentar leer QR (solo para OXXO Gas) ───────────────────────
+  // ─── Paso 1: siempre leer QR si existe; parsers específicos evitan depender de OCR ─
   const qrData = await leerQR(imageBuffer);
   if (qrData) {
     const ticketOxxo = parsearQROxxoGas(qrData);
@@ -39,9 +43,24 @@ async function leerTicket(imageBuffer, mimeType = 'image/jpeg') {
       console.log('[ticketReader] QR Petro 7 leído:', ticketPetro);
       return ticketPetro;
     }
+    const odQr = parseOfficeDepotFacturacionQr(qrData);
+    if (odQr) {
+      return {
+        encontrado: true,
+        comercio: 'officedepot',
+        itu: odQr.itu,
+        total: odQr.amount,
+        amount: odQr.amount,
+        fecha: null,
+        metodoPago: null,
+      };
+    }
+    console.log(
+      '[ticketReader] QR presente, formato no reconocido; datos por Vision (p. ej. promos o otro comercio)'
+    );
   }
 
-  // ─── Paso 2: Claude Vision para otros comercios ───────────────────────────
+  // ─── Paso 2: Claude Vision (comercio + campos) ───────────────────────────
   const base64  = imageBuffer.toString('base64');
   const comercio = await detectarComercio(base64, mimeType);
   const prompt   = elegirPrompt(comercio);
@@ -90,8 +109,15 @@ async function leerTicket(imageBuffer, mimeType = 'image/jpeg') {
     return await completarNoTicket7Eleven(normalized, base64, mimeType);
   }
 
-  if (comercio === 'officedepot' && normalized.itu != null && String(normalized.itu).trim() !== '') {
-    normalized.itu = normalizeItuOfficeDepot(String(normalized.itu));
+  if (comercio === 'officedepot') {
+    const odFromQr = qrData ? parseOfficeDepotFacturacionQr(qrData) : null;
+    if (odFromQr) {
+      normalized.itu = odFromQr.itu;
+      normalized.total = odFromQr.amount;
+      normalized.amount = odFromQr.amount;
+    } else if (normalized.itu != null && String(normalized.itu).trim() !== '') {
+      normalized.itu = normalizeItuOfficeDepot(String(normalized.itu));
+    }
   }
 
   return normalized;
