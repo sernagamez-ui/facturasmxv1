@@ -14,7 +14,8 @@ const axios = require('axios');
 
 const { leerTicket }                                      = require('./ticketReader');
 const { procesarFactura }                                 = require('./facturaRouter');
-const { clasificarGasto, calcularDeducibilidad }          = require('./fiscalRules');
+const { clasificarGasto, calcularDeducibilidad, mensajeFiscal } = require('./fiscalRules');
+const { mensajeDeducibilidad } = require('./deducibilidad');
 const db                                                  = require('./db');
 const { enviarFactura }                                   = require('./mailer');
 const { ORIGON_CDC_CONFIG }                               = require('./portales/origonCdc');
@@ -250,12 +251,15 @@ function _guardarEnHistorial(userId, ticketData, resultado, userData) {
   }
   const metodoPago =
     ticketData.esEfectivo || ticketData.metodoPago === 'efectivo' ? 'efectivo' : 'tarjeta';
+  const ticketId = ticketData.noTicket || ticketData.folio || ticketData.itu || ticketData.num_ticket || 'n/a';
   const deduccion = calcularDeducibilidad({
     comercio: ticketData.comercio,
     total: montoTotal,
     regimen: userData.regimen,
     metodoPago,
     usoCfdi: ticketData.usoCfdi || userData.usoCFDI || userData.usoCfdi,
+    categoria: ticketData.categoria,
+    ticketId,
   });
   const montoDeducible = Number(deduccion.montoDeducible) || 0;
   const ivaAcreditable = Number(deduccion.ivaAcreditable) || 0;
@@ -297,26 +301,38 @@ function _nombreComercio(comercio) {
 
 function _mensajeExito(ticketData, resultado, userData, xmlEnviado) {
   const nombre  = _nombreComercio(ticketData.comercio);
-  const gasto   = clasificarGasto(ticketData.comercio);
+  const ticketId = ticketData.noTicket || ticketData.folio || ticketData.itu || ticketData.num_ticket || 'n/a';
+  const gasto   = clasificarGasto(ticketData.comercio, { categoriaVision: ticketData.categoria, ticketId, skipClasificacionLog: true });
   const iconLinea = gasto.icon || '📄';
   const esCombustible = gasto.categoria === 'combustible';
-  const esDeducible = !['605'].includes(userData.regimen) && !ticketData.esEfectivo;
 
   let msg = `✅ *¡Factura lista!*\n\n`;
   msg += `${iconLinea} ${nombre}\n`;
   if (ticketData.tipoGasolina) msg += `🛢 ${ticketData.tipoGasolina}\n`;
   if (ticketData.litros)       msg += `🔢 ${ticketData.litros}L\n`;
-  if (ticketData.total)        msg += `💰 $${Number(ticketData.total).toFixed(2)}\n`;
+  const totalFiscal = ticketData.total ?? ticketData.monto;
+  if (totalFiscal)             msg += `💰 $${Number(totalFiscal).toFixed(2)}\n`;
   if (ticketData.fecha)        msg += `📅 ${ticketData.fecha}\n`;
 
   msg += '\n';
 
-  if (esDeducible && ticketData.total) {
-    const base = Number(ticketData.total) / 1.16;
-    const iva  = Number(ticketData.total) - base;
-    msg += `✅ *Deducible al 100%*\n`;
-    msg += `💚 IVA acreditable: $${iva.toFixed(2)}\n\n`;
-  } else if (userData.regimen === '605') {
+  if (totalFiscal && userData.regimen) {
+    if (esCombustible) {
+      const td = { ...ticketData, total: totalFiscal };
+      msg += mensajeDeducibilidad(td, userData.regimen);
+    } else {
+      msg += mensajeFiscal({
+        comercio:   ticketData.comercio,
+        total:      totalFiscal,
+        regimen:    userData.regimen,
+        metodoPago: ticketData.metodoPago || (ticketData.esEfectivo ? 'efectivo' : 'tarjeta'),
+        usoCfdi:    ticketData.usoCfdi || userData.usoCFDI || userData.usoCfdi || 'G03',
+        categoria:  ticketData.categoria,
+        ticketId,
+        esViatico:  !!ticketData.esViatico,
+      });
+    }
+  } else if (userData.regimen === '605' && !totalFiscal) {
     msg += esCombustible
       ? `ℹ️ Como asalariado, la gasolina no es deducible en tu declaración anual.\n\n`
       : `ℹ️ Régimen 605: este tipo de gasto no es deducible en tu declaración anual.\n\n`;

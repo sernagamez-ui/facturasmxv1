@@ -21,7 +21,7 @@ const { createEmailInboundHandler }     = require('./src/webhooks/emailInbound')
 const { handleTicket, handleRetryAlsea, handleRetryPetro7Estacion } = require('./src/ticketHandler');
 const { enqueue, stats: queueStats }    = require('./src/facturaQueue');
 const { leerTicket }                    = require('./src/ticketReader');
-const { clasificarGasto, determinarUsoCfdi, mensajeFiscal, calcularDeducibilidad } = require('./src/fiscalRules');
+const { clasificarGasto } = require('./src/fiscalRules');
 const { verificarUsoCfdi, generarBotonesUsoCfdi, guardarEstadoEsperandoUsoCfdi, recuperarEstadoUsoCfdi } = require('./src/usoCfdiFlow');
 
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
@@ -297,14 +297,14 @@ bot.on('photo', async (ctx) => {
   }
 
   // ── 3. Verificar si necesita selección de uso CFDI ───────────────────────
-  const usoCfdiCheck = verificarUsoCfdi(ticketData.comercio, userData.regimen);
+  const usoCfdiCheck = verificarUsoCfdi(ticketData.comercio, userData.regimen, ticketData.categoria);
 
   if (usoCfdiCheck.necesitaPreguntar) {
     guardarEstadoEsperandoUsoCfdi(userId, ticketData, fileId);
     await bot.telegram.deleteMessage(chatId, msg.message_id).catch(() => {});
 
     const { text, buttons } = generarBotonesUsoCfdi(
-      ticketData.comercio, usoCfdiCheck.opciones, usoCfdiCheck.labels
+      ticketData.comercio, usoCfdiCheck.opciones, usoCfdiCheck.labels, ticketData.categoria
     );
     return bot.telegram.sendMessage(chatId, text, {
       parse_mode: 'Markdown',
@@ -335,7 +335,8 @@ bot.on('photo', async (ctx) => {
   });
 
   if (position > 0) {
-    const gasto = clasificarGasto(ticketData.comercio);
+    const ticketId = ticketData.noTicket || ticketData.folio || ticketData.itu || 'n/a';
+    const gasto = clasificarGasto(ticketData.comercio, { categoriaVision: ticketData.categoria, ticketId, skipClasificacionLog: true });
     await bot.telegram.editMessageText(
       chatId, msg.message_id, null,
       `${gasto.icon} Recibido. Tu factura de *${gasto.nombre}* está en cola (posición ${position}). Te aviso cuando esté lista. ⏳`,
@@ -348,21 +349,6 @@ bot.on('photo', async (ctx) => {
 
 async function _enviarResultado(chatId, resultado, ticketData, userData, usoCfdi) {
   let msg = resultado.mensajeBot || '✅ Factura procesada.';
-
-  const total = resultado.totalParaUi ?? ticketData.total ?? ticketData.monto;
-  if (resultado.ok === true && total && userData.regimen) {
-    try {
-      msg += mensajeFiscal({
-        comercio:   ticketData.comercio,
-        total,
-        regimen:    userData.regimen,
-        metodoPago: ticketData.metodoPago || 'tarjeta',
-        usoCfdi:    usoCfdi || 'G03',
-      });
-    } catch (e) {
-      console.error('[server] mensajeFiscal:', e.message);
-    }
-  }
 
   const sendOpts = resultado.ok === true ? { parse_mode: 'Markdown' } : {};
   try {

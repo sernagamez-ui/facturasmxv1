@@ -44,12 +44,48 @@ const CATEGORIAS = {
     deduccion: { pct:100, nota:'Deducible al 100% si es gasto del negocio' },
     ivaAcreditable: true, restriccionEfectivo: true,
   },
+  farmacia: {
+    nombre:'Farmacia', icon:'💊',
+    usoCfdi: { default:'G03', opciones:['G03'] },
+    deduccion: { pct:100, nota:'Deducible al 100% si es estrictamente indispensable' },
+    ivaAcreditable: true, restriccionEfectivo: true,
+  },
   otro: {
     nombre:'Otro gasto', icon:'📄',
     usoCfdi: { default:'G03', opciones:['G03','G01','S01'] },
-    deduccion: { pct:100, nota:'Deducibilidad depende del tipo de gasto' },
-    ivaAcreditable: true, restriccionEfectivo: true,
+    deduccion: { pct:100, nota:'Criterio conservador: el tratamiento fiscal depende del giro real del gasto' },
+    ivaAcreditable: false, restriccionEfectivo: true,
+    notaIva: 'Sin clasificar el giro del comprobante, no se asume IVA acreditable; confirma con tu contador.',
   },
+};
+
+/** Normaliza etiquetas que a veces envía el modelo sin pasar por ticketReader. */
+const VISION_CATEGORIA_ALIAS = {
+  restaurant: 'restaurante',
+  fast_food: 'restaurante',
+  fastfood: 'restaurante',
+  cafe: 'restaurante',
+  coffee: 'restaurante',
+  gas: 'gasolinera',
+  gas_station: 'gasolinera',
+  pharmacy: 'farmacia',
+  supermarket: 'supermercado',
+  convenience_store: 'tienda_conveniencia',
+  other: 'otros',
+};
+
+/** Mapea etiquetas de Vision (`ticketReader`) a claves de CATEGORIAS. */
+const VISION_CATEGORIA_A_INTERNA = {
+  restaurante:         'restaurante',
+  gasolinera:          'combustible',
+  supermercado:        'supermercado',
+  tienda_conveniencia: 'tiendaConveniencia',
+  farmacia:            'farmacia',
+  ferreteria_hogar:    'ferreteria',
+  papeleria_oficina:   'oficina',
+  ropa_moda:           'otro',
+  servicios:           'otro',
+  otros:               null, // activa fallback por nombre de comercio
 };
 
 const COMERCIO_CATEGORIA = {
@@ -61,6 +97,7 @@ const COMERCIO_CATEGORIA = {
   chilis:'restaurante', pfchangs:'restaurante', italiannis:'restaurante',
   vips:'restaurante', popeyes:'restaurante', cpk:'restaurante',
   cheesecake:'restaurante', elporton:'restaurante', alsea:'restaurante', mcdonalds:'restaurante',
+  carlsjr:'restaurante', ihop:'restaurante', bww:'restaurante',
   heb:'supermercado', walmart:'supermercado', soriana:'supermercado',
   chedraui:'supermercado', lacomer:'supermercado', costco:'supermercado',
   homedepot:'ferreteria', officedepot:'oficina', officemax:'oficina',
@@ -81,22 +118,59 @@ const REGIMEN_DEDUCCION = {
   '625':{ nombre:'Plataformas Tecno.',       deduce:true,  acreditaIva:true,  tipo:'PM' },
 };
 
-function clasificarGasto(comercio) {
-  const cat = COMERCIO_CATEGORIA[comercio] || 'otro';
-  return { categoria: cat, ...CATEGORIAS[cat] };
+/**
+ * @param {string} comercio — clave interna (p.ej. carlsjr, general)
+ * @param {object} [options]
+ * @param {string} [options.categoriaVision] — `restaurante` | `gasolinera` | … (salida ticketReader)
+ * @param {string} [options.ticketId] — p.ej. folio del ticket, para log
+ * @param {boolean} [options.skipClasificacionLog] — evita [CLASIFICACION_FALLBACK] (p.ej. en uso CFDI / cola)
+ */
+function clasificarGasto(comercio, options = {}) {
+  const categoriaVision = options.categoriaVision;
+  let raw = categoriaVision != null && String(categoriaVision).trim() !== ''
+    ? String(categoriaVision).trim().toLowerCase().replace(/\s+/g, '_')
+    : null;
+  if (raw) raw = VISION_CATEGORIA_ALIAS[raw] || raw;
+
+  const visionMap = raw ? VISION_CATEGORIA_A_INTERNA[raw] : undefined;
+  const visionUnknownKey = raw && visionMap === undefined;
+  const useNombreFallback =
+    !raw || raw === 'otros' || visionUnknownKey || visionMap === null;
+
+  let categoria;
+  if (useNombreFallback) {
+    categoria = COMERCIO_CATEGORIA[comercio] || 'otro';
+  } else {
+    categoria = visionMap;
+  }
+
+  const visionMissingOrUnknown =
+    !raw || raw === 'otros' || visionUnknownKey;
+  const shouldLogFallback =
+    !options.skipClasificacionLog && visionMissingOrUnknown;
+  if (shouldLogFallback) {
+    console.log('[CLASIFICACION_FALLBACK]', {
+      comercio: comercio || null,
+      categoria_vision: raw,
+      categoria_final: categoria,
+      ticket_id: options.ticketId != null ? String(options.ticketId) : 'n/a',
+    });
+  }
+
+  return { categoria, ...CATEGORIAS[categoria] };
 }
 
-function determinarUsoCfdi(comercio, regimen) {
+function determinarUsoCfdi(comercio, regimen, categoriaVision) {
   const reg = REGIMEN_DEDUCCION[String(regimen)];
   if (reg && !reg.deduce) return { usoCfdi:'S01', opciones:['S01'], preguntarAlUsuario:false };
-  const g = clasificarGasto(comercio);
+  const g = clasificarGasto(comercio, { categoriaVision, skipClasificacionLog: true });
   const c = g.usoCfdi;
   return { usoCfdi:c.default, opciones:c.opciones, preguntarAlUsuario:c.preguntarAlUsuario||false, labels:c.labels||null };
 }
 
-function calcularDeducibilidad({ comercio, total, regimen, metodoPago, usoCfdi, esViatico=false }) {
+function calcularDeducibilidad({ comercio, total, regimen, metodoPago, usoCfdi, categoria: categoriaVision, ticketId, esViatico=false }) {
   const reg = REGIMEN_DEDUCCION[String(regimen)];
-  const g   = clasificarGasto(comercio);
+  const g   = clasificarGasto(comercio, { categoriaVision, ticketId });
   const mt  = Number(total) || 0;
   const sub = mt / 1.16;
   const iva = mt - sub;
@@ -124,17 +198,24 @@ function calcularDeducibilidad({ comercio, total, regimen, metodoPago, usoCfdi, 
     categoria:g.categoria, razon:g.deduccion.nota, notaExtra:g.notaIva||null, icon:g.icon };
 }
 
-function mensajeFiscal({ comercio, total, regimen, metodoPago, usoCfdi, esViatico }) {
-  const d = calcularDeducibilidad({ comercio, total, regimen, metodoPago, usoCfdi, esViatico });
+function mensajeFiscal({ comercio, total, regimen, metodoPago, usoCfdi, categoria, ticketId, esViatico }) {
+  const d = calcularDeducibilidad({ comercio, total, regimen, metodoPago, usoCfdi, categoria, ticketId, esViatico });
   const reg = REGIMEN_DEDUCCION[String(regimen)];
   let msg = '\n';
   if (!d.deducible) { msg += `ℹ️ ${d.razon}\n`; return msg; }
   if (d.categoria === 'restaurante') {
+    msg += `🍽️ *Gasto tipo restaurante* (Art. 28-XX LISR)\n`;
     msg += `📊 *Deducibilidad ISR:* $${d.montoDeducible.toFixed(2)} (8.5% de $${d.subtotal.toFixed(2)})\n`;
-    msg += `🚫 IVA de restaurantes *no es acreditable*\n`;
+    msg += `🚫 IVA *no* acreditable (no deducible) en alimentos preparados en restaurantes / expendio\n`;
   } else {
+    if (d.categoria === 'otro') {
+      msg += `📄 *Categoría general / sin giro claro* — criterio conservador; confirma con tu contador.\n`;
+    }
     msg += `✅ *Deducible ISR:* $${d.montoDeducible.toFixed(2)}\n`;
     if (d.ivaAcreditable > 0) msg += `💚 *IVA acreditable:* $${d.ivaAcreditable.toFixed(2)}\n`;
+    else if (d.categoria === 'otro' && d.iva > 0) {
+      msg += `⚪ *IVA:* no se asume acreditable sin clasificar el giro.\n`;
+    }
   }
   if (d.notaExtra) msg += `\n_${d.notaExtra}_\n`;
   if (reg?.tipo === 'PM') msg += `\n🏢 _Persona moral — régimen ${regimen}_\n`;

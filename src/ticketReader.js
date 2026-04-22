@@ -20,6 +20,118 @@ const {
 } = require('./portales/officedepot');
 
 /**
+ * Categoría semántica (giro) — coincide con el enum que consume `fiscalRules.VISION_CATEGORIA_A_INTERNA`.
+ * Se completa con Claude Vision; para portales con giro fijo se puede sobrescribir sin depender de la lista.
+ */
+const COMERCIO_CATEGORIA_FIJA = {
+  petro7:    'gasolinera',
+  oxxogas:   'gasolinera',
+  heb:       'supermercado',
+  oxxo:      'tienda_conveniencia',
+  '7eleven': 'tienda_conveniencia',
+  sieveEleven: 'tienda_conveniencia',
+  officedepot: 'papeleria_oficina',
+  mcdonalds: 'restaurante',
+  alsea:     'restaurante',
+  carlsjr:   'restaurante',
+  ihop:      'restaurante',
+  bww:       'restaurante',
+  starbucks: 'restaurante', dominos: 'restaurante', burgerking: 'restaurante',
+  chilis: 'restaurante', cpk: 'restaurante', pfchangs: 'restaurante',
+  italiannis: 'restaurante', vips: 'restaurante', popeyes: 'restaurante',
+  cheesecake: 'restaurante', elporton: 'restaurante', peiwei: 'restaurante',
+};
+
+const CATEGORIAS_VISION_PERMITIDAS = new Set([
+  'restaurante', 'gasolinera', 'supermercado', 'tienda_conveniencia', 'farmacia',
+  'ferreteria_hogar', 'papeleria_oficina', 'ropa_moda', 'servicios', 'otros',
+]);
+
+/** Sinónimos que a veces devuelve el modelo (normalizar antes del enum). */
+const ALIAS_CATEGORIA_VISION = {
+  restaurant: 'restaurante',
+  fast_food: 'restaurante',
+  fastfood: 'restaurante',
+  comida: 'restaurante',
+  food: 'restaurante',
+  cafe: 'restaurante',
+  cafeteria: 'restaurante',
+  coffee: 'restaurante',
+  gas: 'gasolinera',
+  gas_station: 'gasolinera',
+  pharmacy: 'farmacia',
+  drugstore: 'farmacia',
+  supermarket: 'supermercado',
+  grocery: 'supermercado',
+  convenience: 'tienda_conveniencia',
+  convenience_store: 'tienda_conveniencia',
+  hardware: 'ferreteria_hogar',
+  home_improvement: 'ferreteria_hogar',
+  office_supplies: 'papeleria_oficina',
+  stationery: 'papeleria_oficina',
+  clothing: 'ropa_moda',
+  apparel: 'ropa_moda',
+  fashion: 'ropa_moda',
+  other: 'otros',
+};
+
+const SUFIJO_CATEGORIA_VISION = `
+
+OBLIGATORIO: incluye en el JSON el campo "categoria" con UNA de estas cadenas exactas (snake_case, sin mayúsculas):
+"restaurante" | "gasolinera" | "supermercado" | "tienda_conveniencia" | "farmacia" | "ferreteria_hogar" | "papeleria_oficina" | "ropa_moda" | "servicios" | "otros"
+
+Instrucción explícita al modelo:
+"Clasifica el comercio por giro, NO por marca. Restaurante = cualquier establecimiento cuyo giro principal sea preparar y vender alimentos (comida rápida, cafeterías, fondas, fine dining, taquerías, bares con comida). Si dudas entre categorías, prioriza la evidencia del ticket: conceptos como 'hamburguesa', 'café', 'taco', 'menú' → restaurante; 'litros', 'magna', 'premium', 'diesel' → gasolinera."
+
+Nunca inventes una categoría fuera de la lista. Si el giro no encaja claramente, usa "otros".
+`;
+
+/**
+ * @param {string|undefined} raw — valor de "categoria" leído del modelo
+ * @returns {string|null} token válido o null
+ */
+function normalizarCategoriaVisionRaw(raw) {
+  if (raw == null) return null;
+  let t = String(raw).trim().toLowerCase().replace(/\s+/g, '_');
+  if (!t) return null;
+  t = ALIAS_CATEGORIA_VISION[t] || t;
+  if (!CATEGORIAS_VISION_PERMITIDAS.has(t)) return null;
+  return t;
+}
+
+/**
+ * Si el modelo omitió o inválidó "categoria", infiere giro por texto de partidas (no por marca).
+ */
+function inferirCategoriaPorContenidoTicket(data) {
+  const parts = [];
+  if (Array.isArray(data?.productos)) parts.push(...data.productos);
+  if (typeof data?.productos === 'string') parts.push(data.productos);
+  if (data?.comercio != null && typeof data.comercio === 'string' && data.comercio !== 'general') {
+    parts.push(data.comercio);
+  }
+  const blob = parts.join(' ').toLowerCase();
+  if (!blob.trim()) return null;
+  if (/\b(litros?\b|lts\.?\b|lt\.?\b|magna|premium|diesel|gasolina|combustible|bomba\b|no\.?\s*bomba|pos\s*gas|oxxo\s*gas|pemex|petro\s*\-?\s*7|monedero\s*gas)\b/i.test(blob)) {
+    return 'gasolinera';
+  }
+  if (/\b(hamburguesa|hamburger|burger|combo|happy\s*meal|menú|menu|taco|tortilla|quesadilla|burrito|hot\s*dog|pizza|café|cafe|latte|espresso|frapp|bebida|refresco|sándwich|sandwich|baguette|alitas|wings|papas\s*fritas|orden|platillo|comida)\b/i.test(blob)) {
+    return 'restaurante';
+  }
+  return null;
+}
+
+/**
+ * Categoría final para el router fiscal: fija por portal conocido, si no, lo que devolvió el modelo.
+ */
+function fusionarCategoriaComercio(comercio, data) {
+  const fija = comercio != null && COMERCIO_CATEGORIA_FIJA[comercio];
+  if (fija) return fija;
+  const fromModel = normalizarCategoriaVisionRaw(data?.categoria);
+  if (fromModel) return fromModel;
+  return inferirCategoriaPorContenidoTicket(data);
+}
+
+/**
  * Lee un ticket desde un buffer de imagen.
  * Orden fijo: (1) intentar leer QR en la imagen; (2) si el texto coincide con un
  * patrón conocido (OXXO Gas, Petro 7, Office Depot), devolver esos datos; (3) si
@@ -103,6 +215,8 @@ async function leerTicket(imageBuffer, mimeType = 'image/jpeg') {
   }
 
   const normalized = { ...data, comercio };
+  const catFusion = fusionarCategoriaComercio(comercio, data);
+  if (catFusion) normalized.categoria = catFusion;
 
   // 7-Eleven: fallback automático si el noTicket no cumple 30-40 dígitos.
   if (comercio === '7eleven') {
@@ -406,6 +520,7 @@ function parsearQROxxoGas(qrString) {
     return {
       encontrado:   true,
       comercio:     'oxxogas',
+      categoria:    'gasolinera',
       estacion,
       noTicket:     folio,
       monto,
@@ -449,6 +564,7 @@ function parsearQRPetro7(qrData) {
   return {
     encontrado:   true,
     comercio:     'petro7',
+    categoria:    'gasolinera',
     noEstacion:   estacion,
     noTicket:     folio,
     wid:          webId.toUpperCase(),
@@ -506,14 +622,16 @@ CAMPOS EN JSON (obligatorios):
   "noTicket": "folio TICKET# solo como dígitos, sin comas",
   "fecha": "YYYY-MM-DD",
   "total": número decimal (TOTAL con IVA),
-  "metodoPago": "efectivo" o "tarjeta" o null
+  "metodoPago": "efectivo" o "tarjeta" o null,
+  "categoria": "restaurante"
 }
 
 REGLAS:
 - branchCode (si existe) y noTicket NUNCA intercambiar: el folio es el número grande del apartado FOLIO/TICKET.
 - Año: ${anioActual} si aplica. El ticket "QR no encontrado" en logs es normal; este ticket a veces no trae QR.
+- "categoria" en este giro es siempre "restaurante".
 
-Responde SOLO con el JSON, sin texto adicional.`;
+Responde SOLO con el JSON, sin texto adicional.` + SUFIJO_CATEGORIA_VISION;
 }
 
 async function detectarComercio(base64, mimeType) {
@@ -634,7 +752,8 @@ CAMPOS A EXTRAER:
   "tienda": "número de tienda de EXACTAMENTE 5 dígitos",
   "fecha": "fecha de consumo en formato YYYY-MM-DD",
   "total": monto total pagado como número sin símbolo $ o null,
-  "metodoPago": "efectivo" o "tarjeta" o null
+  "metodoPago": "efectivo" o "tarjeta" o null,
+  "categoria": "restaurante"
 }
 
 INSTRUCCIONES CRÍTICAS DE LECTURA — LEE CADA DÍGITO CON MÁXIMO CUIDADO:
@@ -659,8 +778,9 @@ INSTRUCCIONES CRÍTICAS DE LECTURA — LEE CADA DÍGITO CON MÁXIMO CUIDADO:
 
 5. NO confundas el número de ORDEN o PEDIDO con el número de TICKET de facturación.
    El número correcto está en la sección "Datos para facturar", NO en el encabezado del ticket.
+- "categoria" en tickets Alsea/Starbucks, etc. es siempre "restaurante" (comida preparada / expendio).
 
-Responde SOLO con el JSON, sin texto adicional.`;
+Responde SOLO con el JSON, sin texto adicional.` + SUFIJO_CATEGORIA_VISION;
 }
 
 // ─────────────────────────────────────────────
@@ -682,7 +802,8 @@ Los campos que necesito son:
   "litros": número de litros o null,
   "total": monto total pagado como número sin símbolo $,
   "metodoPago": "efectivo" o "tarjeta",
-  "tipoGasolina": "Magna" o "Premium" o "Diesel"
+  "tipoGasolina": "Magna" o "Premium" o "Diesel",
+  "categoria": "gasolinera"
 }
 
 REGLAS CRÍTICAS DE LECTURA ÓPTICA — lee cada número con cuidado:
@@ -712,7 +833,9 @@ En la tabla del ticket hay columnas: CANTIDAD | PRECIO | BOM | DESCRIPCION | IMP
 - BOM = numero de bomba (numero entero pequeno como 1, 2, 3)
 - NO confundas BOM con litros. Los litros son siempre el primer numero de la fila, con decimales.
 Si un campo no aparece claramente en el ticket, ponlo como null.
-Responde SOLO con el JSON, sin texto adicional.`;
+- "categoria" es siempre "gasolinera" en carga de combustible.
+
+Responde SOLO con el JSON, sin texto adicional.` + SUFIJO_CATEGORIA_VISION;
 }
 
 // ─────────────────────────────────────────────
@@ -731,7 +854,8 @@ function promptOxxoGas() {
   "fecha": "YYYY-MM-DD",
   "litros": número decimal o null,
   "tipoGasolina": "Magna" o "Premium" o "Diesel",
-  "metodoPago": "tarjeta" o "efectivo"
+  "metodoPago": "tarjeta" o "efectivo",
+  "categoria": "gasolinera"
 }
 
 REGLAS CRÍTICAS:
@@ -739,7 +863,8 @@ REGLAS CRÍTICAS:
 - "nombreEstacion" es el nombre legible de la estación (ej: "ASARCO MTY", "LINCOLN", "CUMBRES")
 - El número de "Afiliación" NO es el folio ni la estación
 - Si fecha dice "MAR 24 26" es 2026-03-24
-- Responde SOLO con el JSON, sin texto adicional.`;
+- "categoria" es siempre "gasolinera" en OXXO Gas.
+- Responde SOLO con el JSON, sin texto adicional.` + SUFIJO_CATEGORIA_VISION;
 }
 
 // ─────────────────────────────────────────────
@@ -763,7 +888,8 @@ El portal de facturación pide cuatro datos del ticket:
   "venta": "código alfanumérico de la venta/transacción (mezcla de letras y números como en el ticket)",
   "fecha": "YYYY-MM-DD",
   "total": número decimal (total pagado con IVA),
-  "metodoPago": "efectivo" o "tarjeta" o null
+  "metodoPago": "efectivo" o "tarjeta" o null,
+  "categoria": "tienda_conveniencia"
 }
 
 REGLAS:
@@ -771,8 +897,9 @@ REGLAS:
 - "venta" es el código alfanumérico que el portal pide junto al folio (a veces etiquetado como venta, transacción o similar).
 - Si el ticket muestra fecha DD/MM/AAAA, convierte a YYYY-MM-DD. El año actual es ${anioActual}.
 - El total es el monto final pagado (con IVA), no el subtotal.
+- "categoria" es "tienda_conveniencia" (no es gasolinera).
 
-Responde SOLO con el JSON, sin texto adicional.`;
+Responde SOLO con el JSON, sin texto adicional.` + SUFIJO_CATEGORIA_VISION;
 }
 
 // ─────────────────────────────────────────────
@@ -797,7 +924,8 @@ CAMPOS A EXTRAER:
   "sucursal": "nombre de la tienda HEB en mayúsculas — aparece en línea propia en el cuerpo del ticket (ej: 'HEB LAS FUENTES', 'HEB MTY SAN PEDRO', 'HEB CHIPINQUE'). NO uses la dirección ni la colonia.",
   "noTicket": "número de ticket — primeros dígitos de la última línea del ticket, ANTES de la fecha. Inclúyelos con sus ceros a la izquierda (ej: '000034').",
   "fecha": "fecha de compra — aparece en la última línea del ticket en formato MM-DD-YY (ej: 01-22-19 = 22 de enero de 2019). Conviértela a YYYY-MM-DD (ej: '2019-01-22').",
-  "total": número decimal — es el monto de '***Venta Total' o '***Venta Total***'. NUNCA uses EFECTIVO, NUNCA uses Cambio, NUNCA uses Venta Subtotal. Solo el valor de ***Venta Total (ej: 658.00).
+  "total": número decimal — es el monto de '***Venta Total' o '***Venta Total***'. NUNCA uses EFECTIVO, NUNCA uses Cambio, NUNCA uses Venta Subtotal. Solo el valor de ***Venta Total (ej: 658.00).",
+  "categoria": "supermercado"
 }
 
 REGLAS CRÍTICAS:
@@ -805,8 +933,9 @@ REGLAS CRÍTICAS:
 - noTicket: los dígitos al INICIO de la última línea (antes de la fecha MM-DD-YY). Cópialos exactamente con sus ceros.
 - fecha: formato de entrada MM-DD-YY → formato de salida YYYY-MM-DD. El año actual es ${anioActual}. YY → 20YY (ej: si ves "26" el año completo es ${anioActual}, si ves "25" es ${anioActual - 1}). Ejemplo: "04-11-26" → "${anioActual}-04-11".
 - total: el campo "***Venta Total" es el precio real de la compra. El campo EFECTIVO es lo que pagó el cliente (puede ser más). Usa SIEMPRE ***Venta Total.
+- "categoria" es "supermercado".
 
-Responde SOLO con el JSON, sin texto adicional.`;
+Responde SOLO con el JSON, sin texto adicional.` + SUFIJO_CATEGORIA_VISION;
 }
 
 // ─────────────────────────────────────────────
@@ -834,7 +963,8 @@ CAMPOS A EXTRAER:
   "tienda": "número de 4 dígitos de la tienda (ej: 1460) o null",
   "fecha": "fecha de compra en formato YYYY-MM-DD",
   "total": monto total como número decimal o null,
-  "metodoPago": "tarjeta" o "efectivo" o null
+  "metodoPago": "tarjeta" o "efectivo" o null,
+  "categoria": "tienda_conveniencia"
 }
 
 REGLAS CRÍTICAS:
@@ -862,8 +992,9 @@ REGLAS CRÍTICAS:
 4. tienda: son los primeros 4 dígitos del noTicket. También aparece explícitamente como "TIENDA XXXX".
 
 5. fecha: formato de entrada puede ser DD/MM/YYYY. Convierte a YYYY-MM-DD.
+6. "categoria" en 7-Eleven es "tienda_conveniencia".
 
-Responde SOLO con el JSON, sin texto adicional.`;
+Responde SOLO con el JSON, sin texto adicional.` + SUFIJO_CATEGORIA_VISION;
 }
 
 // ─────────────────────────────────────────────
@@ -891,7 +1022,8 @@ CAMPOS EN JSON:
   "num_caja": "número de caja o 'Reg.' solo dígitos (string), ej. '01' o '76'",
   "fecha": "YYYY-MM-DD",
   "total": número decimal (total de la compra con IVA que debe facturarse),
-  "metodoPago": "efectivo" o "tarjeta" o null
+  "metodoPago": "efectivo" o "tarjeta" o null,
+  "categoria": "restaurante"
 }
 
 REGLAS:
@@ -900,8 +1032,9 @@ REGLAS:
 - number_store NO es el número de empleado ni el # de pedido.
 - Lee dígitos con cuidado (0 vs O, 1 vs 7).
 - Si la fecha viene DD/MM/AAAA, convierte a YYYY-MM-DD. Año actual ${anioActual}.
+- "categoria" es "restaurante" (alimentos preparados en expendio de comida).
 
-Responde SOLO con el JSON, sin texto adicional.`;
+Responde SOLO con el JSON, sin texto adicional.` + SUFIJO_CATEGORIA_VISION;
 }
 
 // ─────────────────────────────────────────────
@@ -924,7 +1057,8 @@ CAMPOS EN JSON:
   "itu": "cadena ITU de 30 caracteres: 25 alfanuméricos + POSA + 1 dígito. Si lees espacios o guiones, ignóralos al armar la cadena. La subcadena central debe ser exactamente POSA (P-O-S-A letras).",
   "total": número decimal (total pagado con IVA),
   "fecha": "YYYY-MM-DD o null si no está clara",
-  "metodoPago": "efectivo" o "tarjeta" o null
+  "metodoPago": "efectivo" o "tarjeta" o null,
+  "categoria": "papeleria_oficina"
 }
 
 REGLAS CRÍTICAS:
@@ -936,8 +1070,9 @@ REGLAS CRÍTICAS:
 SALIDA OBLIGATORIA:
 - Un único objeto JSON. Sin markdown, sin comillas externas, sin texto antes ni después.
 - No escribas razonamientos, correcciones ni frases como "Wait" o "Let me re-read". Solo el JSON.
+- "categoria" es "papeleria_oficina" (útiles, cómputo, mobiliario de oficina, excepto obras; si dudas, papeleria_oficina).
 
-Responde SOLO con el JSON, sin texto adicional.`;
+Responde SOLO con el JSON, sin texto adicional.` + SUFIJO_CATEGORIA_VISION;
 }
 
 // ─────────────────────────────────────────────
@@ -948,22 +1083,29 @@ function promptGeneral() {
   return `Analiza este ticket o recibo de compra y extrae los datos en formato JSON:
 {
   "encontrado": true,
-  "comercio": "nombre del negocio",
+  "comercio": "nombre comercial legible del negocio (texto del ticket)",
   "folio": "número de folio o ticket",
   "fecha": "YYYY-MM-DD",
-  "productos": ["lista de productos"],
+  "productos": ["lista de productos o descripciones de línea como aparecen en el ticket — necesario para clasificar el giro"],
   "subtotal": número sin IVA o null,
   "iva": número o null,
   "total": número,
   "metodoPago": "efectivo" o "tarjeta",
   "sucursal": "dirección o número de sucursal o null",
-  "urlFacturacion": "URL si aparece en el ticket o null"
+  "urlFacturacion": "URL si aparece en el ticket o null",
+  "categoria": "<obligatorio: una cadena exacta; ver lista abajo — NO copies un ejemplo fijo>"
 }
 
 REGLAS:
 - Si la imagen NO es un ticket, pon "encontrado": false.
 - El total siempre incluye IVA. Si no hay desglose: IVA = total * 0.138.
-- Responde SOLO con el JSON, sin texto adicional.`;
+- "productos": incluye las descripciones reales (ej. nombres de platillos, bebidas, artículos). No dejes la lista vacía si el ticket muestra partidas.
+- "categoria" OBLIGATORIO — clasificación por GIRO del establecimiento, no por marca conocida o desconocida:
+  • Cualquier venta principal de alimentos/bebidas preparados (hamburguesería sin marca, taquería local, café independiente, comida rápida, bar con comida) → restaurante.
+  • Ejemplos que deben ser restaurante aunque la marca no esté en tu entrenamiento: Shake Shack, Carl's Jr., "Tacos Don Juan", cafetería local — si el ticket muestra comida/bebidas preparadas.
+  • Gasolinera: carga de combustible (litros, Magna/Premium/Diesel, bomba).
+  • Usa "otros" solo si el giro no encaja en ninguna categoría de la lista del bloque siguiente.
+- Responde SOLO con el JSON, sin texto adicional.` + SUFIJO_CATEGORIA_VISION;
 }
 
 module.exports = { leerTicket, ALSEA_OPERADOR_MAP, ALSEA_BRANDS, ORIGON_CDC_BRANDS };

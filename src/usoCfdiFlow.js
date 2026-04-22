@@ -4,14 +4,14 @@
 const { determinarUsoCfdi, clasificarGasto, USOS_CFDI } = require('./fiscalRules');
 const db = require('./db');
 
-function verificarUsoCfdi(comercio, regimen) {
-  const r = determinarUsoCfdi(comercio, regimen);
+function verificarUsoCfdi(comercio, regimen, categoriaVision) {
+  const r = determinarUsoCfdi(comercio, regimen, categoriaVision);
   return { necesitaPreguntar: r.preguntarAlUsuario && r.opciones.length > 1,
     usoCfdi: r.usoCfdi, opciones: r.opciones, labels: r.labels };
 }
 
-function generarBotonesUsoCfdi(comercio, opciones, labels) {
-  const g = clasificarGasto(comercio);
+function generarBotonesUsoCfdi(comercio, opciones, labels, categoriaVision) {
+  const g = clasificarGasto(comercio, { categoriaVision, skipClasificacionLog: true });
   const text = `${g.icon} *¿Para qué es esta compra?*\n\nNecesito el uso fiscal para tu factura de *${g.nombre}*:`;
   const buttons = opciones.map(cod => ({
     text: labels?.[cod] || `${cod} — ${USOS_CFDI[cod]||cod}`,
