@@ -18,6 +18,108 @@ function hebScreenshotPath(filename) {
 const PORTAL = 'https://facturacion.heb.com.mx/cli/invoice-create';
 
 const API_WAIT_MS = 120_000;
+const HEB_DEBUG_API = process.env.HEB_DEBUG_API === '1';
+
+/**
+ * @param {import('playwright').Page} page
+ */
+function attachHebApiDebug(page) {
+  if (!HEB_DEBUG_API) return;
+  const log = (tag, p) => {
+    try {
+      if (!p.includes('facturacion.heb.com')) return;
+      console.log(`[HEB][api] ${tag} ${p.slice(0, 160)}${p.length > 160 ? '…' : ''}`);
+    } catch {}
+  };
+  page.on('request', (req) => log(req.method(), req.url()));
+  page.on('response', (res) => {
+    if (!res.url().includes('facturacion.heb.com')) return;
+    if (res.request().method() === 'GET' && res.status() === 200) return;
+    log(String(res.status()), res.url());
+  });
+}
+
+/**
+ * @param {string} u
+ * @param {import('playwright').Request} req
+ * @param {Record<string, unknown> | null} j
+ * @returns {boolean}
+ */
+function isExcludedHebPreTimbrarUrl(u, req) {
+  if (req.method() !== 'POST') return true;
+  for (const ex of [
+    'int_store_sel',
+    'int_ticket_sel',
+    'consulta_ticket_forma_pago',
+    'consulta_facturas_uuid',
+  ]) {
+    if (u.includes(ex)) return true;
+  }
+  // documento (XML/PDF) — no el JSON de timbrado
+  if (u.includes('consulta_factura') && !u.includes('consulta_facturas')) return true;
+  return false;
+}
+
+/**
+ * @param {Record<string, unknown> | null} j
+ * @param {string} u
+ * @returns {boolean}
+ */
+function looksLikeHebTimbradoJson(j, u) {
+  if (!j || typeof j !== 'object' || j.result == null) return false;
+  const r = j.result;
+  if (typeof r !== 'object' || r === null) return false;
+  if (j.list_facturas?.[0]?.document?.xml) return false;
+  const ul = u.toLowerCase();
+  if (ul.includes('timb') || ul.includes('generar_f') || ul.includes('emision_cfdi')) return true;
+  if (j.list_facturas?.[0]?.comp_id) return true;
+  if (r.success === false && (ul.includes('timb') || /factur|timb|cfdi|timbr/i.test(String(r.result_message_user ?? '')))) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Resuelve con { json, res } al primer POST a la API cuyo JSON encaje con el timbrado
+ * (evita depender de que la ruta contenga todavía la palabra "timbrar").
+ * @param {import('playwright').Page} page
+ * @param {number} timeoutMs
+ */
+function waitForHebTimbradoResponse(page, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let done = false;
+    const t = setTimeout(() => {
+      if (done) return;
+      done = true;
+      page.removeListener('response', onResponse);
+      reject(new Error(`HEB timeout: sin timbrado (${timeoutMs / 1000}s). Activa HEB_DEBUG_API=1, revisa heb_step5.png y heb_step6.png. Prueba HEB_HEADFUL=1`));
+    }, timeoutMs);
+
+    /** @param {import('playwright').Response} res */
+    async function onResponse(res) {
+      if (done) return;
+      let j = null;
+      try {
+        const u = res.url();
+        if (!u.includes('facturacion.heb.com.mx') || !u.toLowerCase().includes('/api/')) return;
+        const req = res.request();
+        if (isExcludedHebPreTimbrarUrl(u.toLowerCase(), req)) return;
+        const ct = (res.headers()['content-type'] || '').toLowerCase();
+        if (!ct.includes('json') || res.status() >= 500) return;
+        j = await res.json();
+        if (!looksLikeHebTimbradoJson(j, u)) return;
+        done = true;
+        clearTimeout(t);
+        page.removeListener('response', onResponse);
+        resolve({ json: j, res });
+      } catch {
+        // body no-JSON o ya consumido
+      }
+    }
+
+    page.on('response', onResponse);
+  });
+}
 
 async function _generarFacturaHEB(ticketData, userData) {
   const { sucursal, noTicket, fecha, total } = ticketData;
@@ -43,6 +145,8 @@ async function _generarFacturaHEB(ticketData, userData) {
 
     const page = await context.newPage();
     const captured = {};
+
+    attachHebApiDebug(page);
 
     // Solo lo que no competimos con waitForResponse (evita leer el body del mismo response dos veces)
     page.on('response', async (res) => {
@@ -185,11 +289,21 @@ async function _generarFacturaHEB(ticketData, userData) {
     await page.screenshot({ path: hebScreenshotPath('heb_step5.png') });
     console.log('[HEB] Datos fiscales OK');
 
-    // ── 10. Timbrar: misma lógica que heb.js que funcionó; promesas ANTES del click ──
-    const esPostTimbrar = (r) => {
-      const u = r.url().toLowerCase();
-      return u.includes('/cli/api') && u.includes('timbrar') && r.request().method() === 'POST';
-    };
+    // El SPA a veces llama consulta_ticket_forma_pago al validar RFC/CP; esperamos para no hacer click
+    // en un formulario aún inestable (mismo flujo en logs con ticket OK + datos fiscales).
+    await page
+      .waitForResponse(
+        (r) => r.url().includes('consulta_ticket_forma_pago') && r.request().method() === 'POST',
+        { timeout: 8_000 }
+      )
+      .then(() => console.log('[HEB] API consulta_ticket_forma_pago OK'))
+      .catch(() => {
+        if (HEB_DEBUG_API) {
+          console.log('[HEB] consulta_ticket_forma_pago no visto 8s, sigo igual');
+        }
+      });
+
+    // ── 10. Timbrar: promesas ANTES del click; acepta URLs nuevas o JSON con list_facturas/comp_id ──
     const esConsultaDocumento = (r) => {
       const u = r.url();
       return (
@@ -197,16 +311,36 @@ async function _generarFacturaHEB(ticketData, userData) {
       );
     };
 
-    const timbrarPromise = page.waitForResponse(esPostTimbrar, { timeout: API_WAIT_MS });
-    const consultaFacturaPromise = page.waitForResponse(esConsultaDocumento, { timeout: API_WAIT_MS }).catch(
-      () => null
-    );
+    const timbrarPromise = waitForHebTimbradoResponse(page, API_WAIT_MS);
+    const consultaFacturaPromise = page
+      .waitForResponse(esConsultaDocumento, { timeout: API_WAIT_MS })
+      .catch(() => null);
 
-    await page.getByRole('button', { name: /generar factura/i }).click();
+    const btnGen = page.getByRole('button', { name: /generar factura/i });
+    await btnGen.waitFor({ state: 'visible', timeout: 15_000 });
+    const enabled0 = await btnGen.isEnabled();
+    if (!enabled0) {
+      await page.waitForTimeout(1_000);
+    }
+    let enabled = await btnGen.isEnabled();
+    for (let i = 0; i < 30 && !enabled; i += 1) {
+      await page.waitForTimeout(1_000);
+      enabled = await btnGen.isEnabled();
+    }
+    if (!enabled) {
+      await page.screenshot({ path: hebScreenshotPath('heb_step5b_disabled.png') });
+      throw new Error('HEB botón Generar factura deshabilitado. Revisa RFC/CP o heb_step5b_disabled.png');
+    }
+    await btnGen.scrollIntoViewIfNeeded();
+    try {
+      await btnGen.click({ timeout: 10_000 });
+    } catch {
+      await btnGen.click({ force: true });
+    }
     console.log('[HEB] Click Generar factura');
 
-    const timbradoRes = await timbrarPromise;
-    captured.timbrado = await timbradoRes.json().catch(() => null);
+    const { json: timbradoJson } = await timbrarPromise;
+    captured.timbrado = timbradoJson;
     await page.screenshot({ path: hebScreenshotPath('heb_step6.png') });
 
     if (!captured.timbrado?.result?.success) {
