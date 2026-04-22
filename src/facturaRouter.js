@@ -374,6 +374,8 @@ async function procesarFactura(ticketData, userData, phone, outputDirOverride) {
             portal_forbidden:
               '💡 El portal devolvió 403; en hosting a veces hace falta proxy en MX o red local.',
             proxy_auth: '💡 Revisa PROXY_URL_ROTATING (proxy 407).',
+            red_tls_proxy:
+              '💡 Conexión inestable hacia *carlsjr.cdc.origon.cloud* (TLS/proxy). En Railway: prueba otra `PROXY_URL_ROTATING`, o define *ORIGON_CDC_USE_PROXY=0* (directo) si el portal acepta la IP. Los reintentos ya van en el servidor.',
             origon_error: `💡 ${String(resultado.mensaje || 'Error al contactar al portal')}`,
           };
           const sugerencia =

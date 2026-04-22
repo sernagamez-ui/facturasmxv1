@@ -32,15 +32,66 @@ const ORIGON_CDC_BRANDS = new Set(Object.keys(ORIGON_CDC_CONFIG));
 
 const CFDI_VERSION = '4.0';
 
+/** `ORIGON_CDC_USE_PROXY=0` o `false` = sin proxy en este adaptador aunque exista PROXY_URL_ROTATING (útil si el proxy corta el TLS a origon.cloud). */
+function origonUsaProxy() {
+  const v = String(process.env.ORIGON_CDC_USE_PROXY ?? '').trim().toLowerCase();
+  if (v === '0' || v === 'false' || v === 'no' || v === 'off') return false;
+  return getProxyAgent('rotating') != null;
+}
+
 function origonHttp(extra = {}) {
+  if (!origonUsaProxy()) return { ...extra };
   const agent = getProxyAgent('rotating');
-  if (!agent) return extra;
+  if (!agent) return { ...extra };
   return {
     ...extra,
     httpsAgent: agent,
     httpAgent: agent,
     proxy: false,
   };
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function errorEsReintentable(err) {
+  if (!err) return false;
+  const st = err.response?.status;
+  if (st === 408 || st === 502 || st === 503 || st === 504) return true;
+  const c = err.code;
+  if (['ECONNRESET', 'ETIMEDOUT', 'ECONNABORTED', 'EPIPE', 'ENOTFOUND', 'EAI_AGAIN'].includes(c)) {
+    return true;
+  }
+  const m = String(err.message || err.cause || '').toLowerCase();
+  if (m.includes('timeout')) return true;
+  if (m.includes('socket') && (m.includes('disconnect') || m.includes('closed'))) return true;
+  if (m.includes('tls') || m.includes('ssl') || m.includes('secure connection')) return true;
+  return false;
+}
+
+/**
+ * Varios reintentos: en Railway vía PROXY a veces falla el TLS antes de completar.
+ * @param {string} name — etiqueta de log
+ * @param {() => Promise<any>} run
+ */
+async function withOrigonRetry(name, run) {
+  const max = 3;
+  const delays = [0, 1500, 3200];
+  let lastErr;
+  for (let i = 0; i < max; i++) {
+    if (delays[i]) await sleep(delays[i]);
+    try {
+      return await run();
+    } catch (e) {
+      lastErr = e;
+      const re = errorEsReintentable(e);
+      console.warn(
+        `[OrigonCDC] ${name} falló (${i + 1}/${max}): ${e.message || e}${re ? ' → reintento' : ''}`
+      );
+      if (!re) throw e;
+      if (i === max - 1) throw e;
+    }
+  }
+  throw lastErr;
 }
 
 function buildHeaders(baseUrl) {
@@ -162,19 +213,20 @@ function codesDeSucursalCandidatos(rawBranch, sucursalNombre, branches) {
 }
 
 async function getBranchList(baseUrl, headers, issuerTaxId) {
-  const { data } = await axios.post(
-    `${baseUrl}/Selfservice/GetBranchListByIssuer`,
-    { IssuerTaxId: issuerTaxId, RegionCode: '' },
-    origonHttp({ headers, timeout: 60000 })
+  const { data } = await withOrigonRetry('GetBranchListByIssuer', () =>
+    axios.post(
+      `${baseUrl}/Selfservice/GetBranchListByIssuer`,
+      { IssuerTaxId: issuerTaxId, RegionCode: '' },
+      origonHttp({ headers, timeout: 90000 })
+    )
   );
   if (data?.hasError) throw new Error(data.errorMessage || 'GetBranchListByIssuer');
   return data.model || [];
 }
 
 async function getIssuerTaxId(baseUrl) {
-  const { data } = await axios.get(
-    `${baseUrl}/Selfservice/GetSelfserviceSetup`,
-    origonHttp({ headers: buildHeaders(baseUrl), timeout: 45000 })
+  const { data } = await withOrigonRetry('GetSelfserviceSetup', () =>
+    axios.get(`${baseUrl}/Selfservice/GetSelfserviceSetup`, origonHttp({ headers: buildHeaders(baseUrl), timeout: 90000 }))
   );
   if (data?.hasError) throw new Error(data.errorMessage || 'GetSelfserviceSetup');
   const id = data?.model?.issuerTaxId;
@@ -246,8 +298,10 @@ async function facturarOrigonCdc({
   const baseUrl = cfg.baseUrl;
   const headers = buildHeaders(baseUrl);
 
-  if (getProxyAgent('rotating')) {
+  if (origonUsaProxy()) {
     console.log(`[OrigonCDC/${comercio}] peticiones vía PROXY_URL_ROTATING`);
+  } else {
+    console.log(`[OrigonCDC/${comercio}] conexión directa (sin proxy o ORIGON_CDC_USE_PROXY=0)`);
   }
 
   try {
@@ -282,10 +336,12 @@ async function facturarOrigonCdc({
         PurchaseDate: purchaseDate,
         PurchaseAmount: monto,
       };
-      const valRes = await axios.post(
-        `${baseUrl}/Selfservice/ValidateTicketData`,
-        ticketPayload,
-        origonHttp({ headers, timeout: 45000 })
+      const valRes = await withOrigonRetry(`ValidateTicketData(suc=${bc})`, () =>
+        axios.post(
+          `${baseUrl}/Selfservice/ValidateTicketData`,
+          ticketPayload,
+          origonHttp({ headers, timeout: 90000 })
+        )
       );
       vd = valRes.data;
       lastMsg = String(vd?.errorMessage || '');
@@ -321,10 +377,12 @@ async function facturarOrigonCdc({
       CustomerData: buildCustomerData(userData),
     };
 
-    const preview = await axios.post(
-      `${baseUrl}/Selfservice/GetDetailIssue`,
-      issueBase,
-      origonHttp({ headers, timeout: 45000 })
+    const preview = await withOrigonRetry('GetDetailIssue', () =>
+      axios.post(
+        `${baseUrl}/Selfservice/GetDetailIssue`,
+        issueBase,
+        origonHttp({ headers, timeout: 90000 })
+      )
     );
     if (preview.data?.hasError) {
       return {
@@ -334,10 +392,12 @@ async function facturarOrigonCdc({
       };
     }
 
-    const issRes = await axios.post(
-      `${baseUrl}/Selfservice/TicketIssuance`,
-      issueBase,
-      origonHttp({ headers, timeout: 60000 })
+    const issRes = await withOrigonRetry('TicketIssuance', () =>
+      axios.post(
+        `${baseUrl}/Selfservice/TicketIssuance`,
+        issueBase,
+        origonHttp({ headers, timeout: 120000 })
+      )
     );
     const idm = issRes.data;
     if (idm?.hasError) {
@@ -353,23 +413,25 @@ async function facturarOrigonCdc({
       return { ok: false, error: 'sin_internal_id', mensaje: 'Respuesta sin internalId' };
     }
 
-    const fileRes = await axios.post(
-      `${baseUrl}/Selfservice/GetFile`,
-      {
-        isMassiveDownload: false,
-        internalIds: [internalId],
-        fileType: [1, 2],
-        filters: {
-          pageNumber: 1,
-          pageSize: 10,
-          orderBy: 'StampDate',
-          orderDir: 'DESC',
-          finalstampDate: '2020-10-10',
-          initialstampDate: '2020-10-09',
+    const fileRes = await withOrigonRetry('GetFile', () =>
+      axios.post(
+        `${baseUrl}/Selfservice/GetFile`,
+        {
+          isMassiveDownload: false,
+          internalIds: [internalId],
+          fileType: [1, 2],
+          filters: {
+            pageNumber: 1,
+            pageSize: 10,
+            orderBy: 'StampDate',
+            orderDir: 'DESC',
+            finalstampDate: '2020-10-10',
+            initialstampDate: '2020-10-09',
+          },
+          itemsCount: 7,
         },
-        itemsCount: 7,
-      },
-      origonHttp({ headers, timeout: 120000 })
+        origonHttp({ headers, timeout: 180000 })
+      )
     );
 
     const b64 = fileRes.data?.fileContents;
@@ -416,10 +478,22 @@ async function facturarOrigonCdc({
     const mapped = mapHttpError(err);
     if (mapped) return mapped;
     const msg = err.response?.data?.errorMessage || err.response?.data?.message || err.message;
+    const s = String(msg || err.message || '');
+    const esRed =
+      /socket|disconnected|tls|ssl|secure connection|econnreset|etimed|timeout|econnaborted|network/i.test(
+        s
+      ) && !err.response;
+    if (esRed) {
+      return {
+        ok: false,
+        error: 'red_tls_proxy',
+        mensaje: `${s} — Si usas PROXY, prueba otra salida, reintento más tarde, o define ORIGON_CDC_USE_PROXY=0 (conexión directa; en algunas IPs el portal aún acepta).`,
+      };
+    }
     return {
       ok: false,
       error: 'origon_error',
-      mensaje: String(msg),
+      mensaje: s,
     };
   }
 }
