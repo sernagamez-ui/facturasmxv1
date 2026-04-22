@@ -14,6 +14,7 @@ const MODEL_SONNET = 'claude-sonnet-4-6';           // Alsea: sin QR, dígitos d
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 const { ORIGON_CDC_BRANDS } = require('./portales/origonCdc');
+const { normalizeItu: normalizeItuOfficeDepot } = require('./portales/officedepot');
 
 /**
  * Lee un ticket desde un buffer de imagen.
@@ -73,21 +74,27 @@ async function leerTicket(imageBuffer, mimeType = 'image/jpeg') {
   const text  = response.content[0].text.trim();
   const clean = text.replace(/```json|```/g, '').trim();
 
+  let data;
   try {
-    const data = JSON.parse(clean);
-    const normalized = { ...data, comercio };
-
-    // 7-Eleven: fallback automático si el noTicket no cumple 30-40 dígitos.
-    // Evita pedir captura manual cuando OCR/vision recorta la secuencia.
-    if (comercio === '7eleven') {
-      return await completarNoTicket7Eleven(normalized, base64, mimeType);
-    }
-
-    return normalized;
+    // Sonnet a veces añade razonamiento después del JSON; tomamos solo el primer objeto.
+    data = parseFirstJsonObject(clean);
   } catch {
     console.error('[ticketReader] JSON inválido:', clean.substring(0, 300));
     return { encontrado: false, comercio, error: 'No se pudo leer el ticket' };
   }
+
+  const normalized = { ...data, comercio };
+
+  // 7-Eleven: fallback automático si el noTicket no cumple 30-40 dígitos.
+  if (comercio === '7eleven') {
+    return await completarNoTicket7Eleven(normalized, base64, mimeType);
+  }
+
+  if (comercio === 'officedepot' && normalized.itu != null && String(normalized.itu).trim() !== '') {
+    normalized.itu = normalizeItuOfficeDepot(String(normalized.itu));
+  }
+
+  return normalized;
 }
 
 /** Extrae el primer objeto JSON `{...}` cuando el modelo añade texto después del JSON. */
@@ -899,6 +906,10 @@ REGLAS CRÍTICAS:
 - Si el ticket muestra el ITU en varias líneas, concatena en orden sin separadores.
 - total: monto final de la compra, no subtotal ni propina aparte si el total ya la incluye.
 - Año actual ${anioActual} si la fecha viene con año de 2 dígitos.
+
+SALIDA OBLIGATORIA:
+- Un único objeto JSON. Sin markdown, sin comillas externas, sin texto antes ni después.
+- No escribas razonamientos, correcciones ni frases como "Wait" o "Let me re-read". Solo el JSON.
 
 Responde SOLO con el JSON, sin texto adicional.`;
 }

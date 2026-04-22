@@ -38,7 +38,10 @@ const logErr = (...a) => console.error('[officedepot]', ...a);
 
 function normalizeItu(raw) {
   if (!raw) return '';
-  const clean = String(raw).toUpperCase().replace(/[^A-Z0-9]/g, '');
+  let s = String(raw).toUpperCase();
+  // OCR suele leer "POSA" como "P0SA" (cero en lugar de O).
+  s = s.replace(/P0SA/gi, 'POSA');
+  const clean = s.replace(/[^A-Z0-9]/g, '');
   if (clean.length !== 30) return clean;
   return clean.slice(0, 25) + 'POSA' + clean.slice(29);
 }
