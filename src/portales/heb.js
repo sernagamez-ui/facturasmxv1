@@ -46,6 +46,65 @@ async function clickConfirmacionMaterial(page) {
   return false;
 }
 
+/** Clics frecuentes tras "Generar factura": vista previa, stepper, emitir, etc. */
+async function clickPasosDespuesGenerarFactura(page) {
+  const patrones = [
+    /emitir factura/i,
+    /solicitar factura/i,
+    /confirmar y generar/i,
+    /aceptar y (generar|continuar|emitir)/i,
+    /generar cfdi/i,
+    /finalizar|timbrar|descargar factura/i,
+    /^continuar$/i,
+    /^siguiente$/i,
+  ];
+  for (const re of patrones) {
+    try {
+      const btn = page.getByRole('button', { name: re });
+      if (await btn.count() === 0) continue;
+      const f = btn.first();
+      if (await f.isVisible().catch(() => false)) {
+        await f.click();
+        console.log('[HEB] Clic acción adicional (post Generar):', re.source);
+        await page.waitForTimeout(1_200);
+        await clickConfirmacionMaterial(page);
+      }
+    } catch {}
+  }
+  const step = page.locator(
+    'button[matStepperNext], [matStepperNext], .mat-stepper-next, button:has-text("Siguiente")'
+  );
+  if (await step.count() > 0) {
+    try {
+      if (await step.first().isVisible().catch(() => false)) {
+        await step.first().click();
+        console.log('[HEB] Clic mat-stepper siguiente');
+        await page.waitForTimeout(1_000);
+      }
+    } catch {}
+  }
+}
+
+function buscarListFacturasRecursivo(obj, depth) {
+  if (depth == null) depth = 0;
+  if (depth > 15 || !obj) return null;
+  if (typeof obj === 'object' && !Array.isArray(obj) && Array.isArray(obj.list_facturas) && obj.list_facturas.length) {
+    return obj.list_facturas;
+  }
+  if (Array.isArray(obj)) {
+    for (const it of obj) {
+      const r = buscarListFacturasRecursivo(it, depth + 1);
+      if (r) return r;
+    }
+  } else if (obj && typeof obj === 'object') {
+    for (const k of Object.keys(obj)) {
+      const r = buscarListFacturasRecursivo(obj[k], depth + 1);
+      if (r) return r;
+    }
+  }
+  return null;
+}
+
 async function _generarFacturaHEB(ticketData, userData) {
   const { sucursal, noTicket, fecha, total } = ticketData;
   const { rfc, nombre: razonSocial, cp, regimen: regimenFiscal, email, usoCfdi = 'G03' } = userData;
@@ -79,7 +138,7 @@ async function _generarFacturaHEB(ticketData, userData) {
       if (Array.isArray(j.list_facturas)) return j.list_facturas;
       if (Array.isArray(j.data?.list_facturas)) return j.data.list_facturas;
       if (Array.isArray(j.response?.list_facturas)) return j.response.list_facturas;
-      return null;
+      return buscarListFacturasRecursivo(j, 0);
     }
 
     function jsonFacturaEmitidaOk(j) {
@@ -100,6 +159,8 @@ async function _generarFacturaHEB(ticketData, userData) {
         const u = req.url();
         const m = req.method();
         if (m !== 'POST' && m !== 'PUT' && m !== 'PATCH') return;
+        if (u.includes('google') || u.includes('doubleclick') || u.includes('gstatic') || u.includes('googletagmanager'))
+          return;
         const path = (() => {
           try {
             return new URL(u).pathname;
@@ -107,12 +168,10 @@ async function _generarFacturaHEB(ticketData, userData) {
             return u;
           }
         })();
-        // Ignorar analytics (suelen ser /g/collect o google)
-        if (path.includes('/g/collect') || u.includes('google') || u.includes('doubleclick')) return;
-        if (u.includes('heb.com.mx') && u.includes('/cli/api'))
-          console.log('[HEB] →', m, path);
-        else if (u.includes('heb.com.mx'))
-          console.log('[HEB] → (otro)', m, path);
+        if (path.includes('/g/collect') && u.includes('google')) return;
+        if (!u.toLowerCase().includes('heb')) return;
+        if (u.includes('/cli/api')) console.log('[HEB] →', m, path);
+        else if (!path.includes('/g/collect')) console.log('[HEB] → (ruta otra)', m, u.slice(0, 180));
       } catch {}
     });
 
@@ -325,6 +384,24 @@ async function _generarFacturaHEB(ticketData, userData) {
     await clickConfirmacionMaterial(page);
     await page.waitForTimeout(700);
     await clickConfirmacionMaterial(page);
+    await clickPasosDespuesGenerarFactura(page);
+    await page.waitForLoadState('networkidle', { timeout: 8_000 }).catch(() => {});
+
+    if (!jsonFacturaEmitidaOk(captured.facturaEmitida)) {
+      const txt = page.getByText('Generar factura', { exact: true });
+      if (await txt.count() > 0) {
+        try {
+          await txt.first().click();
+          console.log('[HEB] Clic vía getByText(Generar factura)');
+          await page.waitForTimeout(800);
+        } catch {}
+      }
+    }
+    await genBtn.focus().catch(() => {});
+    await page.keyboard.press('Enter').catch(() => {});
+    await page.waitForTimeout(500);
+    await clickConfirmacionMaterial(page);
+    await clickPasosDespuesGenerarFactura(page);
 
     if (!jsonFacturaEmitidaOk(captured.facturaEmitida) && await genBtn.isVisible().catch(() => false)) {
       await genBtn.click({ force: true }).catch(() => {});
@@ -343,6 +420,7 @@ async function _generarFacturaHEB(ticketData, userData) {
         .catch(() => {});
       await page.waitForTimeout(500);
       await clickConfirmacionMaterial(page);
+      await clickPasosDespuesGenerarFactura(page);
     }
 
     let lastLog = 0;
