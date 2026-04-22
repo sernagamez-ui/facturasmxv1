@@ -53,7 +53,8 @@ async function leerTicket(imageBuffer, mimeType = 'image/jpeg') {
     comercio === '7eleven' ||
     comercio === 'oxxo' ||
     comercio === 'mcdonalds' ||
-    comercio === 'petro7'
+    comercio === 'petro7' ||
+    comercio === 'officedepot'
       ? MODEL_SONNET
       : MODEL;
 
@@ -514,6 +515,7 @@ carlsjr
 ihop
 bww
 mcdonalds
+officedepot
 general
 
 REGLAS:
@@ -538,6 +540,7 @@ REGLAS:
 - Si ves "IHOP", "I HOP", International House of Pancakes -> responde: ihop
 - Si ves "BUFFALO WILD WINGS", "BWW" (restaurante), alitas -> responde: bww
 - Si ves "MCDONALDS", "McDonald's", "MCDONALD'S", "RESTAURANTES ADMX", facturacionmcdonalds.com.mx -> responde: mcdonalds
+- Si ves "OFFICE DEPOT", "OFFICEMAX", "Office Depot", "OfficeMax", "ODMX", facturacion.officedepot.com.mx -> responde: officedepot
 - Cualquier otro comercio -> responde: general`,
         },
       ],
@@ -550,6 +553,7 @@ REGLAS:
     ...ALSEA_BRANDS,
     ...ORIGON_CDC_BRANDS,
     'mcdonalds',
+    'officedepot',
     'general',
   ];
   return valid.includes(val) ? val : 'general';
@@ -566,6 +570,7 @@ function elegirPrompt(comercio) {
     case 'heb':     return promptHEB();
     case '7eleven': return prompt7Eleven();
     case 'mcdonalds': return promptMcDonalds();
+    case 'officedepot': return promptOfficeDepot();
     default:        return promptGeneral();
   }
 }
@@ -862,6 +867,38 @@ REGLAS:
 - number_store NO es el número de empleado ni el # de pedido.
 - Lee dígitos con cuidado (0 vs O, 1 vs 7).
 - Si la fecha viene DD/MM/AAAA, convierte a YYYY-MM-DD. Año actual ${anioActual}.
+
+Responde SOLO con el JSON, sin texto adicional.`;
+}
+
+// ─────────────────────────────────────────────
+// PROMPT — Office Depot / OfficeMax (facturacion.officedepot.com.mx)
+// ─────────────────────────────────────────────
+
+function promptOfficeDepot() {
+  const anioActual = new Date().getFullYear();
+
+  return `Analiza este ticket de Office Depot u OfficeMax México para facturación electrónica.
+
+El portal usa un código ITU de facturación: 25 caracteres alfanuméricos seguidos de la palabra "POSA" y un dígito verificador (30 caracteres en total). Suele aparecer como ITU, código de facturación o bajo un código de barras.
+
+También necesitas el TOTAL a pagar de la compra (con IVA), el mismo monto que debe coincidir con el portal.
+
+CAMPOS EN JSON:
+{
+  "encontrado": true,
+  "comercio": "officedepot",
+  "itu": "cadena ITU de 30 caracteres: 25 alfanuméricos + POSA + 1 dígito. Si lees espacios o guiones, ignóralos al armar la cadena. La subcadena central debe ser exactamente POSA (P-O-S-A letras).",
+  "total": número decimal (total pagado con IVA),
+  "fecha": "YYYY-MM-DD o null si no está clara",
+  "metodoPago": "efectivo" o "tarjeta" o null
+}
+
+REGLAS CRÍTICAS:
+- Copia el ITU carácter por carácter; confunde O (letra) con 0 (cero) solo donde corresponda. En la zona "POSA" deben ser letras P-O-S-A.
+- Si el ticket muestra el ITU en varias líneas, concatena en orden sin separadores.
+- total: monto final de la compra, no subtotal ni propina aparte si el total ya la incluye.
+- Año actual ${anioActual} si la fecha viene con año de 2 dígitos.
 
 Responde SOLO con el JSON, sin texto adicional.`;
 }

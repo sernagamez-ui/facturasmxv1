@@ -17,6 +17,7 @@ const os      = require('os');
 const cron    = require('node-cron');
 
 const db                                = require('./src/db');
+const { initEmailInbound }              = require('./src/emailInbound');
 const { handleTicket, handleRetryAlsea, handleRetryPetro7Estacion } = require('./src/ticketHandler');
 const { enqueue, stats: queueStats }    = require('./src/facturaQueue');
 const { leerTicket }                    = require('./src/ticketReader');
@@ -24,6 +25,7 @@ const { clasificarGasto, determinarUsoCfdi, mensajeFiscal, calcularDeducibilidad
 const { verificarUsoCfdi, generarBotonesUsoCfdi, guardarEstadoEsperandoUsoCfdi, recuperarEstadoUsoCfdi } = require('./src/usoCfdiFlow');
 
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
+initEmailInbound(bot);
 const app = express();
 const IS_RAILWAY = Boolean(process.env.RAILWAY_PROJECT_ID || process.env.RAILWAY_ENVIRONMENT_ID);
 /** Solo true después de `bot.launch()` (polling). En webhook no hay launch → no llamar `bot.stop()`. */
@@ -242,7 +244,9 @@ async function handleOnboarding(ctx, userId, texto, state) {
       db.setState(userId, null);
       const tipoLabel = user.esMoral ? '🏢 Persona moral' : '👤 Persona física';
       return ctx.reply(
-        `🎉 *¡Registro listo!*\n\n${tipoLabel}\n📋 RFC: \`${user.rfc}\`\n👤 ${user.nombre}\n📮 CP: ${user.cp}\n📊 Régimen: ${user.regimen}\n📧 ${user.email}\n\n📸 Ahora mándame la foto de tu ticket.`,
+        `🎉 *¡Registro listo!*\n\n${tipoLabel}\n📋 RFC: \`${user.rfc}\`\n👤 ${user.nombre}\n📮 CP: ${user.cp}\n📊 Régimen: ${user.regimen}\n📧 ${user.email}\n\n` +
+          `📬 Si un comercio solo manda la factura al correo, usa: \`${userId}@factural.mx\`\n\n` +
+          `📸 Ahora mándame la foto de tu ticket.`,
         { parse_mode: 'Markdown', ...Markup.keyboard([['📊 Mis facturas', '⚙️ Mi cuenta'], ['❓ Ayuda']]).resize() }
       );
     }

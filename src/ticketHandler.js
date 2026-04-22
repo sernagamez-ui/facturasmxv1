@@ -3,7 +3,7 @@
  *
  * Diferencias clave vs WhatsApp:
  * - Descarga la imagen vía Telegram API (no Meta)
- * - El servidor envía PDF y XML con sendDocument (stream); email XML es opcional (SMTP)
+ * - El servidor envía PDF y XML con sendDocument (stream); copia al correo vía Resend (mailer.js)
  * - Los portales petro7.js y oxxogas.js NO cambian — retornan pdfPath/xmlPath igual
  */
 
@@ -11,12 +11,12 @@ const fs    = require('fs');
 const path  = require('path');
 const os    = require('os');
 const axios = require('axios');
-const nodemailer = require('nodemailer');
 
 const { leerTicket }                                      = require('./ticketReader');
 const { procesarFactura }                                 = require('./facturaRouter');
 const { clasificarGasto, calcularDeducibilidad }          = require('./fiscalRules');
 const db                                                  = require('./db');
+const { enviarFactura }                                   = require('./mailer');
 const { ORIGON_CDC_CONFIG }                               = require('./portales/origonCdc');
 
 /**
@@ -50,7 +50,7 @@ async function handleTicket(ctx, fileId, userData) {
   if (!ticketData || !ticketData.comercio) {
     return {
       mensajeBot:
-        '❓ No reconocí el tipo de ticket. Por ahora proceso: Petro 7, OXXO Gas, Orsan, Pemex, 🏪 OXXO tienda, Alsea y HEB.',
+        '❓ No reconocí el tipo de ticket. Por ahora proceso: Petro 7, OXXO Gas, Orsan, Pemex, 🏪 OXXO tienda, Office Depot, Alsea y HEB.',
       ok: false,
     };
   }
@@ -107,16 +107,21 @@ async function handleTicket(ctx, fileId, userData) {
   if (resultado.ok) {
     _guardarEnHistorial(userId, ticketData, resultado, userData);
     totalParaUi = ticketData.total ?? ticketData.monto ?? null;
-    if (resultado.xmlPath) {
-      enviarXmlPorEmail(userData.email, resultado.xmlPath, resultado.uuid).catch((e) =>
-        console.warn('[ticketHandler] XML email:', e.message)
-      );
+    if (ticketData.comercio !== 'officedepot') {
+      enviarFactura({
+        email: userData.email,
+        comercio: ticketData.comercio,
+        total: ticketData.total ?? ticketData.monto,
+        uuid: resultado.uuid,
+        xmlPath: resultado.xmlPath || null,
+        pdfPath: resultado.pdfPath || null,
+      }).catch((e) => console.warn('[ticketHandler] Email factura:', e.message));
     }
   }
 
   // ── 7. Construir mensaje de respuesta ────────────────────────────────────
   const mensajeBot = resultado.ok
-    ? _mensajeExito(ticketData, resultado, userData)
+    ? (resultado.userMessage || _mensajeExito(ticketData, resultado, userData))
     : (resultado.userMessage || _mensajeError(resultado, ticketData));
 
   return {
@@ -185,6 +190,14 @@ async function handleRetryAlsea(userId, texto, userData) {
 
   if (resultado.ok) {
     _guardarEnHistorial(userId, ticketData, resultado, userData);
+    enviarFactura({
+      email: userData.email,
+      comercio: ticketData.comercio,
+      total: ticketData.total ?? ticketData.monto,
+      uuid: resultado.uuid,
+      xmlPath: resultado.xmlPath || null,
+      pdfPath: resultado.pdfPath || null,
+    }).catch((e) => console.warn('[ticketHandler] Email factura (Alsea retry):', e.message));
   }
 
   const mensajeBot = resultado.ok
@@ -261,38 +274,8 @@ function _guardarEnHistorial(userId, ticketData, resultado, userData) {
     fecha:          ticketData.fecha || ticketData.fechaTicket || null,
     regimen:        userData.regimen,
     uuid:           resultado.uuid || null,
-    folioFiscal:    resultado.folioFiscal || null,
+    folioFiscal:    resultado.folioFiscal || resultado.newItu || null,
   });
-}
-
-// ── Email XML ─────────────────────────────────────────────────────────────────
-
-async function enviarXmlPorEmail(email, xmlPath, uuid) {
-  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
-    console.warn('[ticketHandler] Sin credenciales SMTP — XML no enviado por email');
-    return;
-  }
-
-  const transporter = nodemailer.createTransport({
-    host:   process.env.SMTP_HOST || 'smtp.gmail.com',
-    port:   Number(process.env.SMTP_PORT) || 587,
-    secure: false,
-    auth:   { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-  });
-
-  const filename = uuid
-    ? `factura_${uuid.substring(0, 8)}.xml`
-    : `factura_${Date.now()}.xml`;
-
-  await transporter.sendMail({
-    from:        `"Cotas" <${process.env.SMTP_USER}>`,
-    to:          email,
-    subject:     '🧾 Tu factura electrónica (XML)',
-    text:        'Adjunto encontrarás el archivo XML de tu factura electrónica generada por Cotas.',
-    attachments: [{ filename, path: xmlPath, contentType: 'application/xml' }],
-  });
-
-  console.log(`[ticketHandler] XML enviado a ${email}`);
 }
 
 // ── Helpers de mensaje ────────────────────────────────────────────────────────
@@ -307,6 +290,7 @@ function _nombreComercio(comercio) {
     italiannis: "Italianni's", vips: 'VIPS', popeyes: 'Popeyes',
     cheesecake: 'The Cheesecake Factory', elporton: 'El Portón', heb: 'HEB',
     mcdonalds: "McDonald's", '7eleven': '7-Eleven',
+    officedepot: 'Office Depot',
   };
   return nombres[comercio] || comercio;
 }
@@ -345,6 +329,13 @@ function _mensajeExito(ticketData, resultado, userData, xmlEnviado) {
   }
   if (xmlEnviado) msg += `📧 XML enviado a \`${userData.email}\`\n`;
   else if (resultado.envioPorCorreo) msg += `📧 El portal lo enviará a tu correo en breve`;
+  else if (
+    userData.email &&
+    process.env.RESEND_API_KEY &&
+    (resultado.xmlPath || resultado.pdfPath)
+  ) {
+    msg += `📧 Copia (XML/PDF) a tu correo vía Factural.\n`;
+  }
 
   return msg;
 }
@@ -414,6 +405,14 @@ async function handleRetryPetro7Estacion(userId, texto, userData) {
 
   if (resultado.ok) {
     _guardarEnHistorial(userId, ticketData, resultado, userData);
+    enviarFactura({
+      email: userData.email,
+      comercio: ticketData.comercio,
+      total: ticketData.total ?? ticketData.monto,
+      uuid: resultado.uuid,
+      xmlPath: resultado.xmlPath || null,
+      pdfPath: resultado.pdfPath || null,
+    }).catch((e) => console.warn('[ticketHandler] Email factura (Petro7 retry):', e.message));
   }
 
   const mensajeBot = resultado.ok

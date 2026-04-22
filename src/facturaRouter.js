@@ -14,6 +14,7 @@ const { facturarAlsea }        = require('./portales/alsea');
 const { facturar7Eleven }     = require('./portales/7eleven');
 const { facturarOrigonCdc, ORIGON_CDC_CONFIG } = require('./portales/origonCdc');
 const { facturarMcDonalds } = require('./portales/mcdonalds');
+const { facturar: facturarOfficeDepot, buildUsuario: buildUsuarioOfficeDepot } = require('./portales/officedepot');
 const { mensajeDeducibilidad, calcularDeducibilidadGasolina } = require('./deducibilidad');
 const { ALSEA_OPERADOR_MAP, ALSEA_BRANDS, ORIGON_CDC_BRANDS } = require('./ticketReader');
 const db = require('./db');
@@ -119,6 +120,32 @@ async function procesarFactura(ticketData, userData, phone, outputDirOverride) {
           resultado.userMessage = resultado.userMessage || errorMap[resultado.error] ||
             `⚠️ No se pudo generar la factura: ${resultado.mensaje || resultado.error}`;
         }
+      }
+
+    // ── Office Depot ────────────────────────────────────────────────────
+    } else if (comercio === 'officedepot') {
+      validar(ticketData, ['itu'], 'Office Depot');
+      const amount = ticketData.amount ?? ticketData.total;
+      if (amount == null || amount === '') {
+        throw new Error(
+          'Faltan datos del ticket de Office Depot: amount/total. ¿La foto está completa y legible?'
+        );
+      }
+      const portalEmail = `${String(phone).replace(/\D/g, '')}@factural.mx`;
+      const usuarioOd = buildUsuarioOfficeDepot(userData, portalEmail);
+      const ticket = { itu: ticketData.itu, amount: Number(amount) };
+      resultado = await facturarOfficeDepot({
+        ticket,
+        usuario: usuarioOd,
+        emailPersonal: userData.email,
+      });
+      if (!resultado.ok) {
+        resultado.userMessage =
+          `⚠️ *Office Depot*\n\n${resultado.error}` +
+          (resultado.portalMsg ? `\n\n_Detalle: ${String(resultado.portalMsg).slice(0, 280)}_` : '');
+      } else {
+        resultado.userMessage = resultado.message;
+        resultado.envioPorCorreo = true;
       }
 
     // ── Petro 7 ─────────────────────────────────────────────────────────
@@ -425,6 +452,7 @@ function armarMensajeExito(resultado, ticketData, userData, comercio) {
     ihop: ORIGON_CDC_CONFIG.ihop?.label || 'IHOP',
     bww: ORIGON_CDC_CONFIG.bww?.label || 'Buffalo Wild Wings',
     mcdonalds: 'McDonald\'s',
+    officedepot: 'Office Depot',
   };
   const nombre = nombres[comercio] || comercio;
 
@@ -461,6 +489,7 @@ function armarMensajeError(error, comercio) {
     ihop: ORIGON_CDC_CONFIG.ihop?.label || 'IHOP',
     bww: ORIGON_CDC_CONFIG.bww?.label || 'Buffalo Wild Wings',
     mcdonalds: 'McDonald\'s',
+    officedepot: 'Office Depot',
   };
   const nombre = nombres[comercio] || comercio;
 
@@ -540,7 +569,16 @@ function comercioFacturableAutomatico(comercio) {
   if (comercio === 'alsea') return true;
   if (ALSEA_BRANDS.has(comercio)) return true;
   if (ORIGON_CDC_BRANDS.has(comercio)) return true;
-  return ['petro7', 'oxxogas', 'oxxo', 'heb', '7eleven', 'sieveEleven', 'mcdonalds'].includes(comercio);
+  return [
+    'petro7',
+    'oxxogas',
+    'oxxo',
+    'heb',
+    '7eleven',
+    'sieveEleven',
+    'mcdonalds',
+    'officedepot',
+  ].includes(comercio);
 }
 
 function etiquetaComercio(comercio) {
@@ -558,6 +596,7 @@ function etiquetaComercio(comercio) {
     '7eleven': '7-Eleven',
     sieveEleven: '7-Eleven',
     mcdonalds: "McDonald's",
+    officedepot: 'Office Depot',
   };
   return n[comercio] || comercio;
 }

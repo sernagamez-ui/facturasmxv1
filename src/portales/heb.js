@@ -6,10 +6,45 @@
 
 'use strict';
 
+const fs   = require('fs');
+const path = require('path');
 const { chromium } = require('playwright');
+
+/** Carpeta para heb_step*.png — en local: `HEB_SCREENSHOT_DIR=./tmp/heb-debug` */
+const HEB_SCREENSHOT_DIR = process.env.HEB_SCREENSHOT_DIR || '/tmp';
+function hebScreenshotPath(filename) {
+  return path.join(HEB_SCREENSHOT_DIR, filename);
+}
 
 const PORTAL     = 'https://facturacion.heb.com.mx/cli/invoice-create';
 const FISCAL_URL = 'https://facturacion.heb.com.mx/cli/customer-tax-data';
+
+/** Muchos SPAs abren mat-dialog al generar factura; hay que confirmar en un segundo paso. */
+async function clickConfirmacionMaterial(page) {
+  for (let intento = 0; intento < 6; intento++) {
+    await page.waitForTimeout(450);
+    const dlg = page.locator('mat-dialog-container, [role="dialog"]').first();
+    if (await dlg.count() === 0) continue;
+    const candidatos = [
+      dlg.getByRole('button', { name: /confirmar/i }),
+      dlg.getByRole('button', { name: /aceptar/i }),
+      dlg.getByRole('button', { name: /continuar/i }),
+      dlg.getByRole('button', { name: /generar/i }),
+    ];
+    for (const loc of candidatos) {
+      try {
+        if (await loc.count() === 0) continue;
+        const b = loc.first();
+        if (await b.isVisible().catch(() => false)) {
+          await b.click();
+          console.log('[HEB] Clic en diálogo de confirmación');
+          return true;
+        }
+      } catch {}
+    }
+  }
+  return false;
+}
 
 async function _generarFacturaHEB(ticketData, userData) {
   const { sucursal, noTicket, fecha, total } = ticketData;
@@ -22,13 +57,16 @@ async function _generarFacturaHEB(ticketData, userData) {
   const fechaNorm = normalizarFecha(fecha);
   const [anio, mes, dia] = fechaNorm.split('-');
 
-  const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
+  const headless = process.env.HEB_HEADFUL !== '1';
+  const browser = await chromium.launch({ headless, args: ['--no-sandbox'] });
   const context = await browser.newContext({
     locale: 'es-MX',
     userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
   });
 
   try {
+    fs.mkdirSync(HEB_SCREENSHOT_DIR, { recursive: true });
+
     const page = await context.newPage();
     const captured = {};
 
@@ -60,10 +98,21 @@ async function _generarFacturaHEB(ticketData, userData) {
       if (!traceRequests) return;
       try {
         const u = req.url();
-        if (!u.includes('heb.com.mx')) return;
         const m = req.method();
-        if (m === 'POST' || m === 'PUT' || m === 'PATCH')
-          console.log('[HEB] →', m, new URL(u).pathname);
+        if (m !== 'POST' && m !== 'PUT' && m !== 'PATCH') return;
+        const path = (() => {
+          try {
+            return new URL(u).pathname;
+          } catch {
+            return u;
+          }
+        })();
+        // Ignorar analytics (suelen ser /g/collect o google)
+        if (path.includes('/g/collect') || u.includes('google') || u.includes('doubleclick')) return;
+        if (u.includes('heb.com.mx') && u.includes('/cli/api'))
+          console.log('[HEB] →', m, path);
+        else if (u.includes('heb.com.mx'))
+          console.log('[HEB] → (otro)', m, path);
       } catch {}
     });
 
@@ -132,7 +181,7 @@ async function _generarFacturaHEB(ticketData, userData) {
     console.log(`[HEB] ${sucursal} → ${storeId} (${storeDes})`);
 
     // Screenshot del estado inicial del formulario
-    await page.screenshot({ path: '/tmp/heb_step0.png' });
+    await page.screenshot({ path: hebScreenshotPath('heb_step0.png') });
 
     // ── 3. Sucursal autocomplete ──────────────────────────────────────────────
     const inputs = page.locator('mat-form-field input');
@@ -160,7 +209,7 @@ async function _generarFacturaHEB(ticketData, userData) {
     if (!clicked && n > 0) await allOpts.first().click();
 
     console.log('[HEB] Sucursal seleccionada');
-    await page.screenshot({ path: '/tmp/heb_step1.png' });
+    await page.screenshot({ path: hebScreenshotPath('heb_step1.png') });
 
     // ── 4. Ticket ─────────────────────────────────────────────────────────────
     // Segundo mat-form-field input es el campo Ticket
@@ -198,7 +247,7 @@ async function _generarFacturaHEB(ticketData, userData) {
     await inputs.nth(3).fill(String(total));
     console.log('[HEB] Venta:', total);
 
-    await page.screenshot({ path: '/tmp/heb_step2.png' });
+    await page.screenshot({ path: hebScreenshotPath('heb_step2.png') });
 
     // ── 7. Agregar ticket ─────────────────────────────────────────────────────
     await page.getByRole('button', { name: /agregar/i }).click();
@@ -208,7 +257,7 @@ async function _generarFacturaHEB(ticketData, userData) {
       r => r.url().includes('int_ticket_sel'), { timeout: 15_000 }
     );
     const ticketSel = await ticketSelRes.json().catch(() => null);
-    await page.screenshot({ path: '/tmp/heb_step3.png' });
+    await page.screenshot({ path: hebScreenshotPath('heb_step3.png') });
 
     if (!ticketSel?.result?.success || !ticketSel?.tickets?.length) {
       const msg = ticketSel?.result?.result_message_user ?? 'ticket no encontrado';
@@ -257,19 +306,44 @@ async function _generarFacturaHEB(ticketData, userData) {
     console.log('[HEB] Uso CFDI:', usoCfdi);
 
     await page.waitForTimeout(300);
-    await page.screenshot({ path: '/tmp/heb_step5.png' });
+    await page.screenshot({ path: hebScreenshotPath('heb_step5.png') });
     console.log('[HEB] Datos fiscales OK');
 
     // ── 10. Generar factura ───────────────────────────────────────────────────
     const EMITIR_MS = 120_000;
     const genBtn = page.getByRole('button', { name: /generar factura/i });
     await genBtn.waitFor({ state: 'visible', timeout: 15_000 });
+    await genBtn.scrollIntoViewIfNeeded();
     console.log('[HEB] Botón Generar factura habilitado:', await genBtn.isEnabled());
 
     emitirClicked = true;
     traceRequests = true;
     await genBtn.click({ timeout: 20_000 });
     console.log('[HEB] Click Generar factura');
+
+    await page.waitForTimeout(800);
+    await clickConfirmacionMaterial(page);
+    await page.waitForTimeout(700);
+    await clickConfirmacionMaterial(page);
+
+    if (!jsonFacturaEmitidaOk(captured.facturaEmitida) && await genBtn.isVisible().catch(() => false)) {
+      await genBtn.click({ force: true }).catch(() => {});
+      await page.waitForTimeout(600);
+      await clickConfirmacionMaterial(page);
+    }
+    if (!jsonFacturaEmitidaOk(captured.facturaEmitida)) {
+      await page
+        .evaluate(() => {
+          const btns = [...document.querySelectorAll('button')];
+          const b = btns.find(
+            (el) => /generar/i.test(el.textContent || '') && /factura/i.test(el.textContent || '')
+          );
+          if (b) (b).click();
+        })
+        .catch(() => {});
+      await page.waitForTimeout(500);
+      await clickConfirmacionMaterial(page);
+    }
 
     let lastLog = 0;
     const tWait = Date.now();
@@ -284,7 +358,7 @@ async function _generarFacturaHEB(ticketData, userData) {
     }
     traceRequests = false;
 
-    await page.screenshot({ path: '/tmp/heb_step6.png' });
+    await page.screenshot({ path: hebScreenshotPath('heb_step6.png') });
 
     if (!jsonFacturaEmitidaOk(captured.facturaEmitida)) {
       const hint = captured.lastPortalMessage ? ` Portal: ${captured.lastPortalMessage}` : '';
@@ -308,7 +382,7 @@ async function _generarFacturaHEB(ticketData, userData) {
       await page.waitForTimeout(500);
     }
     await page.waitForTimeout(1_000);
-    await page.screenshot({ path: '/tmp/heb_step7.png' });
+    await page.screenshot({ path: hebScreenshotPath('heb_step7.png') });
 
     const doc =
       facturaInfo?.document?.xml && facturaInfo?.document?.pdf

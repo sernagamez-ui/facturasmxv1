@@ -312,7 +312,7 @@ async function procesarTicket(phone, imageBuffer, mimeType) {
     await wa.sendText(phone,
       `ℹ️ Detecté un ticket de *${ticketData.comercio || 'este comercio'}*.\n\n` +
       `Ese comercio aún no tiene facturación automática en Cotas por este canal.\n\n` +
-      `Soportados: Petro 7, OXXO Gas, OXXO tienda, HEB, 7-Eleven, marcas Alsea, Carl's Jr. / IHOP / BWW (Grupo Galería), McDonald's, etc.`
+      `Soportados: Petro 7, OXXO Gas, OXXO tienda, HEB, 7-Eleven, Office Depot / OfficeMax, marcas Alsea, Carl's Jr. / IHOP / BWW (Grupo Galería), McDonald's, etc.`
     );
     return;
   }
