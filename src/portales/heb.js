@@ -85,6 +85,45 @@ async function clickPasosDespuesGenerarFactura(page) {
   }
 }
 
+/** Avisos, términos o leyenda fiscal suelen ser mat-checkbox sin marcar. */
+async function marcarCheckboxesFiscalesHeb(page) {
+  const cbs = page.locator(
+    'mat-checkbox input[type="checkbox"], .mat-mdc-checkbox input, input.mat-mdc-checkbox-input, mat-slide-toggle input'
+  );
+  const n = await cbs.count();
+  for (let i = 0; i < n; i++) {
+    try {
+      const el = cbs.nth(i);
+      if (await el.isVisible().catch(() => false) && !(await el.isChecked().catch(() => true))) {
+        await el.click({ force: true });
+        await page.waitForTimeout(250);
+        console.log('[HEB] Checkbox/ switch marcado en datos fiscales');
+      }
+    } catch {}
+  }
+  const porTexto = page.locator('mat-checkbox').filter({ hasText: /acepto|términos|aviso|privacidad|declaro/i });
+  if (await porTexto.count() > 0) {
+    try {
+      await porTexto.first().click();
+      await page.waitForTimeout(200);
+      console.log('[HEB] Checkbox por texto términos/acepto');
+    } catch {}
+  }
+}
+
+/**
+ * El portal a veces solo muestra "enviado a su correo" sin devolver list_facturas al bot.
+ * Devuelve: email | err | desconocido
+ */
+async function hebCasoExitoSoloMensajeEnPagina(page) {
+  const t = (await page.locator('body').innerText().catch(() => '')).toLowerCase();
+  if (/(rechaz|error|no se pudo|inválid|faltan|verifique|intente de nuevo)/.test(t)) return 'err';
+  if (/(enviada|enviado|se ha enviado|ha sido enviada|correo electrónico|e-mail|email)/.test(t) &&
+    /(factura|cfdi|comprobante|timbre|éxito|exitos)/.test(t)) return 'email';
+  if (/(descarg|xml|pdf|folio fiscal|uuid|comprobante generado)/.test(t)) return 'pantalla_ok';
+  return 'desconocido';
+}
+
 function buscarListFacturasRecursivo(obj, depth) {
   if (depth == null) depth = 0;
   if (depth > 15 || !obj) return null;
@@ -117,10 +156,24 @@ async function _generarFacturaHEB(ticketData, userData) {
   const [anio, mes, dia] = fechaNorm.split('-');
 
   const headless = process.env.HEB_HEADFUL !== '1';
-  const browser = await chromium.launch({ headless, args: ['--no-sandbox'] });
+  const browser = await chromium.launch({
+    headless,
+    args: [
+      '--no-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-blink-features=AutomationControlled',
+    ],
+  });
   const context = await browser.newContext({
     locale: 'es-MX',
-    userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    userAgent:
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    viewport: { width: 1366, height: 900 },
+  });
+  await context.addInitScript(() => {
+    try {
+      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    } catch {}
   });
 
   try {
@@ -365,6 +418,7 @@ async function _generarFacturaHEB(ticketData, userData) {
     console.log('[HEB] Uso CFDI:', usoCfdi);
 
     await page.waitForTimeout(300);
+    await marcarCheckboxesFiscalesHeb(page);
     await page.screenshot({ path: hebScreenshotPath('heb_step5.png') });
     console.log('[HEB] Datos fiscales OK');
 
@@ -387,16 +441,6 @@ async function _generarFacturaHEB(ticketData, userData) {
     await clickPasosDespuesGenerarFactura(page);
     await page.waitForLoadState('networkidle', { timeout: 8_000 }).catch(() => {});
 
-    if (!jsonFacturaEmitidaOk(captured.facturaEmitida)) {
-      const txt = page.getByText('Generar factura', { exact: true });
-      if (await txt.count() > 0) {
-        try {
-          await txt.first().click();
-          console.log('[HEB] Clic vía getByText(Generar factura)');
-          await page.waitForTimeout(800);
-        } catch {}
-      }
-    }
     await genBtn.focus().catch(() => {});
     await page.keyboard.press('Enter').catch(() => {});
     await page.waitForTimeout(500);
@@ -439,9 +483,23 @@ async function _generarFacturaHEB(ticketData, userData) {
     await page.screenshot({ path: hebScreenshotPath('heb_step6.png') });
 
     if (!jsonFacturaEmitidaOk(captured.facturaEmitida)) {
+      const dom = await hebCasoExitoSoloMensajeEnPagina(page);
+      if (dom === 'email') {
+        throw new Error(
+          'HEB solo correo: el portal indica envío al email y no recibimos XML o PDF en la sesión automática. ' +
+          'Revisa el correo registrado, o en facturacion.heb.com.mx abre "Mis facturas" y descarga el CFDI. ' +
+          'Si hace falta, marca términos a mano con HEB_HEADFUL=1 o completa en navegador.'
+        );
+      }
+      if (dom === 'pantalla_ok') {
+        throw new Error(
+          'HEB la pantalla muestra comprobante o descarga, pero el JSON de API no llegó al script. ' +
+          'Revisa heb_step6.png o abre HEB a mano para descargar XML o PDF.'
+        );
+      }
       const hint = captured.lastPortalMessage ? ` Portal: ${captured.lastPortalMessage}` : '';
       throw new Error(
-        `HEB timeout o el portal no devolvió la factura.${hint} Revisa logs [HEB] → y [HEB] API.`
+        `HEB timeout: sin respuesta de factura en API${hint}. Revisa heb_step6.png. Prueba HEB_HEADFUL=1.`
       );
     }
     const facturaInfo = extraerListFacturas(captured.facturaEmitida)?.[0];

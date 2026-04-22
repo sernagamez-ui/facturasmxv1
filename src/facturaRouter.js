@@ -15,7 +15,8 @@ const { facturar7Eleven }     = require('./portales/7eleven');
 const { facturarOrigonCdc, ORIGON_CDC_CONFIG } = require('./portales/origonCdc');
 const { facturarMcDonalds } = require('./portales/mcdonalds');
 const { facturar: facturarOfficeDepot, buildUsuario: buildUsuarioOfficeDepot } = require('./portales/officedepot');
-const { mensajeDeducibilidad, calcularDeducibilidadGasolina } = require('./deducibilidad');
+const { mensajeDeducibilidad } = require('./deducibilidad');
+const { mensajeFiscal } = require('./fiscalRules');
 const { ALSEA_OPERADOR_MAP, ALSEA_BRANDS, ORIGON_CDC_BRANDS } = require('./ticketReader');
 const db = require('./db');
 
@@ -431,13 +432,19 @@ async function procesarFactura(ticketData, userData, phone, outputDirOverride) {
 
   } catch (err) {
     const raw = String(err.message ?? err);
-    const techHeb =
+    const hebTextoLargo =
       comercio === 'heb' &&
-      /waitForResponse|Timeout \d+ms exceeded|playwright|HEB timeout|HEB sin|portal HEB/i.test(raw);
-    const userMessage = techHeb
-      ? `⚠️ *Problema con el portal HEB al generar la factura o la respuesta tardó demasiado.*\n\n_${raw.slice(0, 400)}_\n\n` +
-        `Reintenta en unos minutos. Si sigue igual, factura en facturacion.heb.com.mx o revisa que el deploy tenga el último código.`
-      : `⚠️ *No pude leer todos los datos del ticket.*\n\n${raw}\n\n¿Puedes tomar otra foto más clara y cercana?`;
+      /HEB solo correo|pantalla muestra|HEB timeout: sin|ticket no encontrado|No se encontraron/i.test(raw);
+    const techHebPlano =
+      comercio === 'heb' &&
+      /waitForResponse|Timeout \d+ms exceeded|playwright|HEB sin|portal HEB/i.test(raw) &&
+      !/HEB solo correo|pantalla muestra|HEB timeout: sin|ticket no encontrado|No se encontraron/i.test(raw);
+    const userMessage = hebTextoLargo
+      ? `⚠️ *HEB*\n\n${raw.slice(0, 1800)}`
+      : techHebPlano
+        ? `⚠️ *Problema con el portal HEB al generar la factura o la respuesta tardó demasiado.*\n\n_${raw.slice(0, 400)}_\n\n` +
+          `Reintenta en unos minutos. Si sigue igual, factura en facturacion.heb.com.mx o revisa el deploy.`
+        : `⚠️ *No pude leer todos los datos del ticket.*\n\n${raw}\n\n¿Puedes tomar otra foto más clara y cercana?`;
     return {
       ok: false, comercio,
       error: raw,
@@ -486,9 +493,10 @@ function armarMensajeExito(resultado, ticketData, userData, comercio) {
   msg += `🏪 ${nombre}\n`;
   if (ticketData.tipoGasolina) msg += `⛽ ${ticketData.tipoGasolina}\n`;
   if (ticketData.litros)       msg += `🔢 ${ticketData.litros} litros\n`;
-  if (ticketData.total)        msg += `💰 $${Number(ticketData.total).toFixed(2)} MXN\n`;
-  if (ticketData.fecha)        msg += `📅 ${ticketData.fecha}\n`;
-  if (resultado.uuid)          msg += `🔖 UUID: \`${resultado.uuid}\`\n`;
+  const totalFiscal = ticketData.total ?? ticketData.monto;
+  if (totalFiscal)              msg += `💰 $${Number(totalFiscal).toFixed(2)} MXN\n`;
+  if (ticketData.fecha)         msg += `📅 ${ticketData.fecha}\n`;
+  if (resultado.uuid)           msg += `🔖 UUID: \`${resultado.uuid}\`\n`;
 
   if (resultado.pdfPath || resultado.xmlPath) {
     msg += `\n📎 Te envío los archivos:\n`;
@@ -499,7 +507,26 @@ function armarMensajeExito(resultado, ticketData, userData, comercio) {
     msg += `_(Revisa spam si no llega en 5 min)_\n`;
   }
 
-  msg += mensajeDeducibilidad(ticketData, userData.regimen);
+  if (totalFiscal) {
+    const ticketId = ticketData.noTicket || ticketData.folio || ticketData.itu || ticketData.num_ticket || 'n/a';
+    if (comercio === 'petro7' || comercio === 'oxxogas') {
+      const td = { ...ticketData, total: totalFiscal };
+      msg += mensajeDeducibilidad(td, userData.regimen);
+    } else {
+      // Deducibilidad: `ticketData.categoria` viene de Vision / fusión en ticketReader (giro, no marca);
+      // `clasificarGasto` en fiscalRules usa eso como verdad primaria y solo cae a nombre de comercio si falta o es "otros".
+      msg += mensajeFiscal({
+        comercio,
+        total:        totalFiscal,
+        regimen:      userData.regimen,
+        metodoPago:   ticketData.metodoPago || (ticketData.esEfectivo ? 'efectivo' : 'tarjeta'),
+        usoCfdi:      comercioUsoCFDI(comercio, userData),
+        categoria:    ticketData.categoria,
+        ticketId,
+        esViatico:    !!ticketData.esViatico,
+      });
+    }
+  }
   return msg;
 }
 
