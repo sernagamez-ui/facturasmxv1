@@ -528,6 +528,14 @@ function armarMensajeError(error, comercio) {
     msg += `HEB solo permite facturar tickets del mes en curso. Este ticket ya no es facturable.`;
   } else if (error?.includes('30 días') || error?.includes('vencido')) {
     msg += `Este ticket ya pasó el plazo de 30 días para facturar.`;
+  } else if (
+    comercio === 'heb' &&
+    (String(error).includes('ticket no encontrado') || String(error).includes('No se encontraron'))
+  ) {
+    msg +=
+      `HEB no localizó ese ticket: el *número de folio/ticket*, la *fecha* y el *total* ` +
+      `deben coincidir con el ticket *exactamente*  como en la caja. A veces la foto se lee mal. ` +
+      `Comprueba en el impreso o prueba otra compra.`;
   } else {
     msg += `Error: ${error}\n\nIntenta de nuevo o escribe *ayuda*.`;
   }
