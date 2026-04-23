@@ -146,7 +146,7 @@ function looksLikeHebDocumentoJson(j) {
 /**
  * Escucha un JSON con list_facturas[].document.xml (misma lógica que el timbrado, sin
  * page.waitForResponse — evita TimeoutError de Playwright en consulta de documento).
- * Regístrala antes de “Generar factura” y úsala después del timbrado, o llama a abort() si
+ * Regístrala antes de "Generar factura" y úsala después del timbrado, o llama a abort() si
  * el timbrado ya trae XML+PDF.
  * @param {import('playwright').Page} page
  * @param {number} timeoutMs
@@ -360,17 +360,32 @@ async function _generarFacturaHEB(ticketData, userData) {
     await fi.nth(2).fill(String(cp));
     await page.waitForTimeout(800);
     console.log('[HEB] CP:', cp);
+
+    // ── Régimen fiscal — autocomplete: click + fill + elegir opción "612 - ..."
+    await fi.nth(3).click();
     await fi.nth(3).fill(String(regimenFiscal));
-    await page.waitForTimeout(400);
-    const regimenOpt = page.locator('mat-option').first();
-    if (await regimenOpt.count()) await regimenOpt.click();
+    await page.waitForTimeout(800);
+    const regimenOpt = page.locator('mat-option', {
+      hasText: new RegExp(`^\\s*${regimenFiscal}\\b`),
+    });
+    await regimenOpt.first().waitFor({ state: 'visible', timeout: 8_000 });
+    await regimenOpt.first().click();
+    await page.waitForTimeout(300);
     console.log('[HEB] Régimen:', regimenFiscal);
+
     await fi.nth(4).fill(email);
     console.log('[HEB] Email:', email);
+
+    // ── USO CFDI — autocomplete: click + fill + elegir opción "G03 - ..."
+    await fi.nth(5).click();
     await fi.nth(5).fill(usoCfdi);
-    await page.waitForTimeout(400);
-    const usoOpt = page.locator('mat-option').first();
-    if (await usoOpt.count()) await usoOpt.click();
+    await page.waitForTimeout(800);
+    const usoOpt = page.locator('mat-option', {
+      hasText: new RegExp(`^\\s*${usoCfdi}\\b`),
+    });
+    await usoOpt.first().waitFor({ state: 'visible', timeout: 8_000 });
+    await usoOpt.first().click();
+    await page.waitForTimeout(300);
     console.log('[HEB] Uso CFDI:', usoCfdi);
 
     await page.waitForTimeout(300);

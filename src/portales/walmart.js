@@ -12,7 +12,8 @@
  * El CFDI se envía al correo (mismo patrón de éxito que HEB con envioPorCorreo).
  *
  * Tiempos: el sitio usa UpdatePanel; a veces “refresca” o tarda en los postbacks. Por defecto
- * 120s por acción (sobre 25s de Playwright). Ajusta con WALMART_TIMEOUT_MS (milis).
+ * 120s por acción. Ajusta con WALMART_TIMEOUT_MS; tras el Aceptar fiscal, el bucle a frmReportAdmin
+ * usa al menos 3 min (o WALMART_POST_FISCAL_MS en milis).
  *
  * Avisos emergentes: el portal muestra modales (p. ej. actualización a CFDI 4.0) que bloquean
  * el flujo; se cierran con `cerrarPopupsWalmart` + `dialog.accept()` en alert nativos.
@@ -36,28 +37,45 @@ function navTimeoutMs() {
   return Number.isFinite(n) && n >= 30_000 ? n : 120_000;
 }
 
+/** Tras Aceptar en RFC: a veces hay varios postbacks, forma de pago, modales. */
+function postFiscalWaitMs() {
+  const raw = process.env.WALMART_POST_FISCAL_MS;
+  if (raw != null && String(raw).trim() !== '') {
+    const n = Number.parseInt(String(raw).trim(), 10);
+    if (Number.isFinite(n) && n >= 60_000) return n;
+  }
+  return Math.max(navTimeoutMs(), 180_000);
+}
+
 const SHOT = process.env.WALMART_SCREENSHOT_DIR || '/tmp';
 
 /**
  * Espera el POST de ASP.NET (AJAX) típico del UpdatePanel tras un click.
  * @param {import('playwright').Page} p
- * @param {string} pathFragment — ej. frmDatos, frmRFCEdita, frmReportAdmin
+ * @param {string | string[]} pathFragment — ej. frmDatos, o varías asp con UpdatePanel
  * @param {number} t
  */
 async function waitForAjaxPost(p, pathFragment, t) {
+  const list = (Array.isArray(pathFragment) ? pathFragment : [pathFragment]).map((s) =>
+    String(s || '').toLowerCase()
+  );
+  const matchUrl = (u) => {
+    const n = (u || '').toLowerCase();
+    return list.some((frag) => n.includes(frag));
+  };
   try {
     await p.waitForResponse(
       (r) =>
         r.url().includes('walmartmexico.com.mx') &&
-        r.url().toLowerCase().includes(pathFragment.toLowerCase()) &&
         r.request().method() === 'POST' &&
-        r.status() < 500,
+        r.status() < 500 &&
+        matchUrl(r.url()),
       { timeout: t }
     );
   } catch {
     /* algunos clics hacen navegación completa en vez de solo Delta */
   }
-  await p.waitForTimeout(600);
+  await p.waitForTimeout(700);
 }
 
 /**
@@ -270,6 +288,7 @@ async function despejarAvisosWalmart(page, tag, rondas = 5) {
  * Tras "Aceptar" en datos fiscales: el portal puede (a) ir a frmReportAdmin, (b) mostrar
  * "ya facturado" / error sin cambiar de URL, (c) mostrar "Continuar" (forma de pago).
  * No uses solo waitForURL(frmReportAdmin) — si (b), hace timeout inútil.
+ * Pueden requerirse **varios** "Continuar" (forma de pago / asistentes); antes solo se hacía 1.
  *
  * @param {import('playwright').Page} page
  * @param {number} maxMs
@@ -280,16 +299,17 @@ async function esperarReportAdminTrasFiscal(page, maxMs, tag) {
     /ya\s+(se\s+encuentra\s+)?factur|facturad[oa]\s+previamente|previamente\s+factur|no\s+puede\s+emitir\s+.*\s+nuev|comprobante\s+fiscal\s+.*\s+(generad|emitid)|duplicad[oa].*factur|ya\s+existe\s+un\s+comprobante/i;
   const rePortalNeg =
     /no\s+se\s+encontr[oó]\s+el\s+(ticket|comprobante|registro)|ticket\s+no\s+v[aá]lid|no\s+v[aá]lido\s+para\s+factur|plazo\s+de\s+facturaci[oó]n\s+vencid|operaci[oó]n\s+no\s+v[aá]lid/i;
-
+  const urlEsReportAdmin = (u) => (u || '').toLowerCase().includes('frmreportadmin');
+  const MAX_CONTINUAR = 10;
   const t0 = Date.now();
-  let clickedContinuar = false;
+  let continuarClicks = 0;
   let tick = 0;
 
   while (Date.now() - t0 < maxMs) {
     tick += 1;
     if (tick % 2 === 0) await despejarAvisosWalmart(page, tag, 2);
     const url = page.url();
-    if (url.includes('frmReportAdmin')) return { kind: 'admin' };
+    if (urlEsReportAdmin(url)) return { kind: 'admin' };
 
     let head = '';
     try {
@@ -309,7 +329,7 @@ async function esperarReportAdminTrasFiscal(page, maxMs, tag) {
     }
 
     const btnC = page.locator('#ctl00_ContentPlaceHolder1_btnContinuar');
-    if (!clickedContinuar && (await btnC.isVisible().catch(() => false))) {
+    if (continuarClicks < MAX_CONTINUAR && (await btnC.isVisible().catch(() => false))) {
       const pay = page.locator('#ctl00_ContentPlaceHolder1_ddlPaymentType');
       if (await pay.count()) {
         try {
@@ -324,11 +344,28 @@ async function esperarReportAdminTrasFiscal(page, maxMs, tag) {
         }
       }
       await despejarAvisosWalmart(page, tag, 1);
-      await btnC.click();
-      clickedContinuar = true;
-      console.log(`${tag} click Continuar (forma de pago)`);
-      await waitForAjaxPost(page, 'frmRFCEdita', Math.min(maxMs, 90_000));
-      await page.waitForTimeout(800);
+      try {
+        await btnC.scrollIntoViewIfNeeded({ timeout: 6_000 });
+      } catch {
+        /* */
+      }
+      console.log(`${tag} Continuar (forma de pago) [${continuarClicks + 1}/${MAX_CONTINUAR}]`);
+      await btnC.click({ timeout: 25_000 });
+      continuarClicks += 1;
+      const restPost = Math.min(95_000, maxMs - (Date.now() - t0) - 500);
+      await waitForAjaxPost(
+        page,
+        ['frmrfcedita', 'frmreportadmin', 'frmdatos'],
+        Math.max(5_000, restPost)
+      );
+      const restRace = Math.max(4_000, maxMs - (Date.now() - t0) - 500);
+      await Promise.race([
+        page.waitForURL(/frmreportadmin/i, { timeout: restRace }),
+        page.locator('#ctl00_ContentPlaceHolder1_btnContinuar').waitFor({ state: 'hidden', timeout: Math.min(32_000, restRace) }),
+      ]).catch(() => {});
+      await despejarAvisosWalmart(page, tag, 1);
+      if (urlEsReportAdmin(page.url())) return { kind: 'admin' };
+      await page.waitForTimeout(600);
       continue;
     }
 
@@ -505,10 +542,12 @@ async function facturarWalmart({ tc, tr, userData }) {
       }
     }
     await page.locator('input#ctl00_ContentPlaceHolder1_btnAceptar').first().click();
-    await waitForAjaxPost(page, 'frmRFCEdita', T);
+    await waitForAjaxPost(page, ['frmrfcedita', 'frmreportadmin'], T);
     await page.waitForTimeout(1200);
 
-    const postFiscal = await esperarReportAdminTrasFiscal(page, T, tag);
+    const tPost = postFiscalWaitMs();
+    console.log(`${tag} panel envío: tiempo máx. post-fiscal ${(tPost / 1000).toFixed(0)}s (WALMART_POST_FISCAL_MS si está definida)`);
+    const postFiscal = await esperarReportAdminTrasFiscal(page, tPost, tag);
     if (postFiscal.kind === 'ya_facturado') {
       return {
         ok: false,
@@ -546,8 +585,8 @@ async function facturarWalmart({ tc, tr, userData }) {
         ok: false,
         error: 'timeout',
         userMessage:
-          '⚠️ El portal no pasó a la pantalla de envío a tiempo. Si el ticket *ya estaba facturado*, a veces la página se queda sin avanzar.\n\n' +
-            'Prueba con un ticket nuevo, o `WALMART_HEADFUL=1` y revisa `walmart_timeout_post_fiscal.png` (WALMART_SCREENSHOT_DIR).',
+          '⚠️ El portal no pasó a la pantalla de envío a tiempo. Si el ticket *ya estaba facturado* o faltan pasos (forma de pago / Continuar), el sitio a veces se queda atrás.\n\n' +
+            'Prueba de nuevo, sube `WALMART_POST_FISCAL_MS` (p. ej. 300000) o `WALMART_TIMEOUT_MS` en el servidor, y revisa `walmart_timeout_post_fiscal.png` (WALMART_SCREENSHOT_DIR) con `WALMART_HEADFUL=1` en local si hace falta.',
       };
     }
     console.log(`${tag} frmReportAdmin URL`);
