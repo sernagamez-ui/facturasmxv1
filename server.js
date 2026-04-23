@@ -23,8 +23,17 @@ const { enqueue, stats: queueStats }    = require('./src/facturaQueue');
 const { leerTicket }                    = require('./src/ticketReader');
 const { clasificarGasto } = require('./src/fiscalRules');
 const { verificarUsoCfdi, generarBotonesUsoCfdi, guardarEstadoEsperandoUsoCfdi, recuperarEstadoUsoCfdi } = require('./src/usoCfdiFlow');
+const {
+  ofrecerNotaTrasCfdi,
+  enrutarNotaDespuesCfdi,
+  limpiarEsperaNota,
+  manejarComandoNota,
+  manejarTextoNotaLibre,
+  escapeResumen,
+} = require('./src/notaNegocioFlow');
 
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
+enrutarNotaDespuesCfdi(bot, db);
 const app = express();
 const IS_RAILWAY = Boolean(process.env.RAILWAY_PROJECT_ID || process.env.RAILWAY_ENVIRONMENT_ID);
 /** Solo true después de `bot.launch()` (polling). En webhook no hay launch → no llamar `bot.stop()`. */
@@ -125,7 +134,7 @@ bot.action(/^usocfdi_(.+)$/, async (ctx) => {
     },
     onComplete: async (resultado) => {
       await bot.telegram.deleteMessage(chatId, msgProc.message_id).catch(() => {});
-      await _enviarResultado(chatId, resultado, ticketData, userData, usoCfdi);
+      await _enviarResultado(chatId, userId, resultado, ticketData, userData, usoCfdi);
     },
     onError: async (err) => {
       await bot.telegram.deleteMessage(chatId, msgProc.message_id).catch(() => {});
@@ -138,6 +147,21 @@ bot.action(/^usocfdi_(.+)$/, async (ctx) => {
 bot.on('text', async (ctx) => {
   const userId = String(ctx.from.id);
   const texto  = ctx.message.text.trim();
+
+  if (await manejarComandoNota(ctx, db)) return;
+
+  if (db.getState(userId)?.esperando_nota_uuid) {
+    if (texto.startsWith('/')) {
+      limpiarEsperaNota(db, userId);
+      return;
+    }
+    if (['📊 Mis facturas', '⚙️ Mi cuenta', '❓ Ayuda'].includes(texto)) {
+      limpiarEsperaNota(db, userId);
+    } else {
+      return await manejarTextoNotaLibre(ctx, db);
+    }
+  }
+
   if (texto.startsWith('/')) return;
 
   if (texto === '📊 Mis facturas') return handleMisFacturas(ctx);
@@ -163,6 +187,19 @@ bot.on('text', async (ctx) => {
       if (resultado.xmlPath && fs.existsSync(resultado.xmlPath)) {
         await ctx.replyWithDocument({ source: resultado.xmlPath, filename: `factura_${Date.now()}.xml` }, { caption: '🗂 XML' });
       }
+      if (resultado.ok && resultado.uuid) {
+        const tuvoAdj =
+          (resultado.pdfPath && fs.existsSync(resultado.pdfPath)) ||
+          (resultado.xmlPath && fs.existsSync(resultado.xmlPath));
+        if (tuvoAdj) {
+          limpiarEsperaNota(db, userId);
+          await ofrecerNotaTrasCfdi(bot, {
+            chatId: ctx.chat.id,
+            userId,
+            uuid: resultado.uuid,
+          });
+        }
+      }
     } catch (err) {
       await ctx.telegram.deleteMessage(ctx.chat.id, msg.message_id).catch(() => {});
       db.setState(userId, null);
@@ -187,6 +224,19 @@ bot.on('text', async (ctx) => {
       }
       if (resultado.xmlPath && fs.existsSync(resultado.xmlPath)) {
         await ctx.replyWithDocument({ source: resultado.xmlPath, filename: `factura_${Date.now()}.xml` }, { caption: '🗂 XML' });
+      }
+      if (resultado.ok && resultado.uuid) {
+        const tuvoAdj =
+          (resultado.pdfPath && fs.existsSync(resultado.pdfPath)) ||
+          (resultado.xmlPath && fs.existsSync(resultado.xmlPath));
+        if (tuvoAdj) {
+          limpiarEsperaNota(db, userId);
+          await ofrecerNotaTrasCfdi(bot, {
+            chatId: ctx.chat.id,
+            userId,
+            uuid: resultado.uuid,
+          });
+        }
       }
     } catch (err) {
       await ctx.telegram.deleteMessage(ctx.chat.id, msg.message_id).catch(() => {});
@@ -262,6 +312,10 @@ bot.on('photo', async (ctx) => {
     return ctx.reply('Primero necesito tus datos. Usa /start para registrarte.');
   }
 
+  if (db.getState(userId)?.esperando_nota_uuid) {
+    limpiarEsperaNota(db, userId);
+  }
+
   const userData = db.getUser(userId);
   const foto     = ctx.message.photo[ctx.message.photo.length - 1];
   const fileId   = foto.file_id;
@@ -325,7 +379,7 @@ bot.on('photo', async (ctx) => {
     },
     onComplete: async (resultado) => {
       await bot.telegram.deleteMessage(chatId, msg.message_id).catch(() => {});
-      await _enviarResultado(chatId, resultado, ticketData, userData, ticketData.usoCfdi);
+      await _enviarResultado(chatId, userId, resultado, ticketData, userData, ticketData.usoCfdi);
     },
     onError: async (err) => {
       await bot.telegram.deleteMessage(chatId, msg.message_id).catch(() => {});
@@ -347,7 +401,9 @@ bot.on('photo', async (ctx) => {
 
 // ── Enviar resultado con info fiscal ─────────────────────────────────────────
 
-async function _enviarResultado(chatId, resultado, ticketData, userData, usoCfdi) {
+async function _enviarResultado(chatId, userId, resultado, ticketData, userData, usoCfdi) {
+  if (userId) limpiarEsperaNota(db, userId);
+
   let msg = resultado.mensajeBot || '✅ Factura procesada.';
 
   const sendOpts = resultado.ok === true ? { parse_mode: 'Markdown' } : {};
@@ -387,6 +443,15 @@ async function _enviarResultado(chatId, resultado, ticketData, userData, usoCfdi
       console.error('[server] sendDocument XML:', err.message);
     }
   }
+
+  const tuvoAdj =
+    resultado.ok &&
+    resultado.uuid &&
+    ((resultado.pdfPath && fs.existsSync(resultado.pdfPath)) ||
+      (resultado.xmlPath && fs.existsSync(resultado.xmlPath)));
+  if (tuvoAdj) {
+    await ofrecerNotaTrasCfdi(bot, { chatId, userId, uuid: resultado.uuid });
+  }
 }
 
 // ── Menú ──────────────────────────────────────────────────────────────────────
@@ -415,6 +480,17 @@ async function handleMisFacturas(ctx) {
   } else if (regimen === '605') {
     msg += `ℹ️ Como asalariado, estos gastos no generan deducción propia.\n_Tus CFDIs quedan guardados para referencia._`;
   }
+
+  msg += `\n*Por factura:*\n`;
+  for (const f of facturas) {
+    const u = String(f.uuid || '').replace(/-/g, '');
+    const u8 = u.length >= 8 ? u.slice(0, 8) : (u || '--------');
+    const m = Number(f.total || f.monto || 0);
+    const nota = f.nota_negocio ? escapeResumen(f.nota_negocio) : null;
+    msg += `• \`${u8}\` $${m.toFixed(2)}` + (nota ? ` — _${nota}_` : '') + `\n`;
+  }
+  msg += `\n_Para añadir o editar nota: /nota y los 8 primeros caracteres del UUID (sin guiones)._`;
+
   await ctx.reply(msg, { parse_mode: 'Markdown' });
 }
 
@@ -434,6 +510,7 @@ async function handleAyuda(ctx) {
     '1. Mándame la foto de tu ticket\n' +
     '2. En ~2 minutos tramito tu factura\n' +
     '3. Recibes PDF aquí y XML a tu correo\n\n' +
+    'Después del CFDI puedes dejar una *nota de negocio* (o /nota + 8 letras del UUID) para tu contador.\n\n' +
     '⛽ *Gasolineras:* Petro 7, OXXO Gas\n' +
     '🏪 *Tiendas:* OXXO\n' +
     '🍽️ *Restaurantes:* Starbucks, Domino\'s, BK, Chili\'s y más (Alsea)\n' +

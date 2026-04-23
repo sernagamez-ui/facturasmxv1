@@ -279,6 +279,7 @@ function _guardarEnHistorial(userId, ticketData, resultado, userData) {
     regimen:        userData.regimen,
     uuid:           resultado.uuid || null,
     folioFiscal:    resultado.folioFiscal || resultado.newItu || null,
+    nota_negocio:   null,
   });
 }
 

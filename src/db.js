@@ -78,6 +78,8 @@ const stmts = {
   getAllFactMes: db.prepare('SELECT user_id, data FROM facturas WHERE created_at >= ? AND created_at < ?'),
   getEst:       db.prepare('SELECT estacion_id FROM estaciones WHERE nombre = ?'),
   setEst:       db.prepare('INSERT OR REPLACE INTO estaciones (nombre, estacion_id) VALUES (?, ?)'),
+  updateFactura: db.prepare('UPDATE facturas SET data = ? WHERE id = ?'),
+  getFacturasUser: db.prepare('SELECT id, data FROM facturas WHERE user_id = ? ORDER BY id DESC LIMIT 500'),
 };
 
 function getUser(id) {
@@ -148,6 +150,52 @@ function getFacturasMesAnteriorTodos() {
 function getEstacionId(n)    { const r = stmts.getEst.get((n||'').toLowerCase().trim()); return r ? r.estacion_id : null; }
 function setEstacionId(n, id){ stmts.setEst.run((n||'').toLowerCase().trim(), id); }
 
+/**
+ * Compara UUID del SAT: admite 8 hex iniciales (sin guiones) o el UUID completo.
+ * @returns {{ id: number, data: object } | null}
+ */
+function findFacturaByUserIdAndUuidKey(telegramId, uuidOrKey8) {
+  const key = String(uuidOrKey8 || '')
+    .replace(/-/g, '')
+    .toLowerCase()
+    .replace(/[^a-f0-9]/g, '');
+  if (key.length < 8) return null;
+  const k8 = key.slice(0, 8);
+  const uid = normalizeId(telegramId);
+  const legacy = legacyId(telegramId);
+  const idSet = new Set();
+  for (const userKey of [uid, legacy].filter((x, i, a) => a.indexOf(x) === i)) {
+    for (const r of stmts.getFacturasUser.all(userKey) || []) {
+      if (idSet.has(r.id)) continue;
+      idSet.add(r.id);
+      let d;
+      try {
+        d = JSON.parse(r.data);
+      } catch {
+        continue;
+      }
+      const u = (d.uuid || '').replace(/-/g, '').toLowerCase();
+      if (u.length >= 8 && u.slice(0, 8) === k8) return { id: r.id, data: d };
+    }
+  }
+  return null;
+}
+
+/**
+ * @param {string} telegramId
+ * @param {string} uuidOrKey8 — UUID completo o 8+ caracteres hex
+ * @param {string|null} nota — null para borrar
+ */
+function actualizarNotaFactura(telegramId, uuidOrKey8, nota) {
+  const found = findFacturaByUserIdAndUuidKey(telegramId, uuidOrKey8);
+  if (!found) return { ok: false, error: 'not_found' };
+  const s = nota == null || String(nota).trim() === '' ? null : String(nota).trim();
+  const notaCorta = s == null ? null : s.slice(0, 200);
+  const next = { ...found.data, nota_negocio: notaCorta };
+  stmts.updateFactura.run(JSON.stringify(next), found.id);
+  return { ok: true, data: next };
+}
+
 // Migración automática JSON → SQLite (una sola vez)
 (function migrate() {
   if (db.prepare('SELECT COUNT(*) as c FROM users').get().c > 0) return;
@@ -203,4 +251,6 @@ module.exports = {
   getEstacionId,
   setEstacionId,
   getStorageInfo,
+  actualizarNotaFactura,
+  findFacturaByUserIdAndUuidKey,
 };

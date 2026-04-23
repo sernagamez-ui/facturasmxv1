@@ -169,6 +169,7 @@ function createEmailInboundHandler(bot, db) {
           monto: montoTotal,
           total: montoTotal,
           uuid,
+          nota_negocio: null,
           origen: 'email-webhook',
           fecha: receivedAt || new Date().toISOString(),
           fromEmail: from,
