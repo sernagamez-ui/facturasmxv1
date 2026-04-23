@@ -1,0 +1,8 @@
+{
+  "status": 200,
+  "data": {
+    "alerta": true,
+    "codigo": 204,
+    "mensaje": "ticket_facturado"
+  }
+}

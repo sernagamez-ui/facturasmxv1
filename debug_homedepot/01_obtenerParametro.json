@@ -1,0 +1,9 @@
+{
+  "status": 200,
+  "data": {
+    "parametro": "ENABLE_LOGS",
+    "valor": "true",
+    "codigo": 200,
+    "mensaje": "Parámetro obtenido exitosamente"
+  }
+}

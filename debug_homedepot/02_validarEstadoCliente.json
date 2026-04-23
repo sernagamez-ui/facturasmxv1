@@ -1,0 +1,8 @@
+{
+  "status": 200,
+  "data": {
+    "alerta": true,
+    "codigo": 200,
+    "mensaje": "Cliente activo"
+  }
+}
