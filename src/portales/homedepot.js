@@ -93,6 +93,7 @@ async function agregarTicket(client, noTicket) {
     if (mensaje.includes('facturado'))       err.code = 'ticket_facturado';
     else if (mensaje.includes('encontrado')) err.code = 'ticket_no_encontrado';
     else if (mensaje.includes('vencido') || mensaje.includes('expirado')) err.code = 'ticket_vencido';
+    else if (mensaje.includes('longitud'))  err.code = 'ticket_longitud_invalida';
     else                                     err.code = 'ticket_invalido';
     err.portalMessage = r.data.mensaje;
     throw err;
@@ -103,6 +104,65 @@ async function agregarTicket(client, noTicket) {
     throw err;
   }
   return r.data;
+}
+
+/**
+ * El ticket impreso bajo el código de barras suele traer 22 dígitos; el API exige 23
+ * (p. ej. 0875200208186042026243 → 00875200208186042026243).
+ */
+function candidatosNoTicketHDM(soloDigitos) {
+  const s = String(soloDigitos || '').replace(/\D/g, '');
+  if (!s) return [];
+  if (s.length === 23) return [s];
+  const out = [];
+  if (s.length === 22) {
+    out.push('0' + s, s);
+  } else if (s.length === 21) {
+    out.push('00' + s, '0' + s, s);
+  } else if (s.length === 20) {
+    out.push('000' + s, '00' + s, '0' + s);
+  } else if (s.length === 24) {
+    out.push(s.slice(0, 23), s, s.slice(1));
+  } else if (s.length === 25) {
+    out.push(s.slice(0, 23), s.slice(1, 24), s.slice(2, 25));
+  } else {
+    out.push(s.padStart(23, '0'));
+  }
+  return [...new Set(out)];
+}
+
+async function agregarTicketConCandidatos(client, soloDigitos) {
+  const candidatos = candidatosNoTicketHDM(soloDigitos);
+  if (candidatos.length === 0) {
+    const e = new Error('sin candidatos de ticket');
+    e.code = 'ticket_formato_invalido';
+    throw e;
+  }
+  let lastErr;
+  for (let i = 0; i < candidatos.length; i++) {
+    const nt = candidatos[i];
+    try {
+      const ticketData = await agregarTicket(client, nt);
+      return { ticketData, noTicket: nt };
+    } catch (e) {
+      lastErr = e;
+      const p = String(e.portalMessage || e.message || '').toLowerCase();
+      if (e.code === 'ticket_facturado' || e.code === 'ticket_vencido') throw e;
+      const puedeReintentar =
+        e.code === 'ticket_longitud_invalida' ||
+        (e.code === 'ticket_invalido' && p.includes('longitud')) ||
+        e.code === 'ticket_no_encontrado' ||
+        p.includes('no encontr');
+      if (puedeReintentar && i < candidatos.length - 1) {
+        console.log(
+          `[HomeDepot] agregarTicket falló (${e.code} ${(e.portalMessage || '').slice(0, 60)}); probando otro noTicket...`
+        );
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw lastErr;
 }
 
 async function verificarComprobantePrevio(client, rfc, noTicket) {
@@ -365,7 +425,8 @@ async function facturarHomeDepot({ noTicket, userData, outputDir }) {
   const client = makeClient();
 
   try {
-    console.log(`${tag} Facturando ticket ${ticket} para RFC ${rfc}`);
+    const candidatos = candidatosNoTicketHDM(ticket);
+    console.log(`${tag} Facturando (RFC ${rfc}) noTicket leído=${ticket} candidatos=[${candidatos.join(' | ')}]`);
 
     // 1. Sanity check
     await obtenerParametro(client);
@@ -373,13 +434,13 @@ async function facturarHomeDepot({ noTicket, userData, outputDir }) {
     // 2. Estado del cliente (no crítico — solo informativo)
     await validarEstadoCliente(client, rfc).catch(() => null);
 
-    // 3. Traer datos del ticket
+    // 3. Traer datos del ticket (reintento si 22↔23 dígitos u otro padding)
     console.log(`${tag} Consultando ticket...`);
-    const ticketData = await agregarTicket(client, ticket);
-    console.log(`${tag} Ticket OK: tienda=${ticketData.tienda} total=$${ticketData.metodoPagoInfo?.totalTicket} conceptos=${ticketData.conceptos.length}`);
+    const { ticketData, noTicket: noTicketEfectivo } = await agregarTicketConCandidatos(client, ticket);
+    console.log(`${tag} Ticket OK: noTicket=${noTicketEfectivo} tienda=${ticketData.tienda} total=$${ticketData.metodoPagoInfo?.totalTicket} conceptos=${ticketData.conceptos.length}`);
 
     // 4. ¿Ya facturado para este RFC?
-    const prev = await verificarComprobantePrevio(client, rfc, ticket);
+    const prev = await verificarComprobantePrevio(client, rfc, noTicketEfectivo);
     if (prev.success === true) {
       return {
         ok: false,
@@ -401,7 +462,7 @@ async function facturarHomeDepot({ noTicket, userData, outputDir }) {
 
     // 8. Timbrar
     console.log(`${tag} Timbrando...`);
-    const payload = buildPayloadTimbrado({ ticketData, tienda, serie, cliente, noTicket: ticket });
+    const payload = buildPayloadTimbrado({ ticketData, tienda, serie, cliente, noTicket: noTicketEfectivo });
     const cfdi = await timbrado(client, payload);
     console.log(`${tag} ✅ UUID=${cfdi.uuid} Folio=${cfdi.folio} Total=$${cfdi.total}`);
 
@@ -435,6 +496,8 @@ async function facturarHomeDepot({ noTicket, userData, outputDir }) {
     const messages = {
       ticket_formato_invalido:
         '🔍 El número del ticket tiene un formato inválido (deben ser 23 dígitos).',
+      ticket_longitud_invalida:
+        '🔍 El portal rechazó la longitud del folio. Revisa la línea *justo debajo del código de barras* (23 dígitos; a veces el impreso trae 22 y falta un cero al inicio).',
       ticket_facturado:
         '📋 Este ticket ya fue facturado anteriormente.',
       ticket_no_encontrado:

@@ -1111,9 +1111,9 @@ CAMPOS A EXTRAER:
 
 REGLAS CRÍTICAS:
 
-1. noTicket: es UNA SOLA secuencia de EXACTAMENTE 23 dígitos (NO espacios, NO guiones, NO letras) impresa DEBAJO del código de barras en la parte inferior del ticket.
-   Ejemplo real: 00875200208187042026991 (23 dígitos)
-   Estructura interna: [00 prefijo][tienda 4d][secuencia/fecha/caja 17d]
+1. noTicket: es UNA SOLA secuencia de dígitos impresa DEBAJO del código de barras (el API usa 23 dígitos). A veces el impreso muestra 22 dígitos (falta un 0 al inicio); copia lo que ves; el sistema puede completar ceros.
+   Ejemplos: 00875200208187042026991 (23 dígitos) o 0875200208186042026243 (22 en ticket físico — correcto si es lo que muestra la línea).
+   Estructura interna aproximada: [prefijo/ceros][tienda][resto]
 
    - COPIA TODOS LOS DÍGITOS en orden, sin omitir ninguno
    - NO uses el RFC del emisor (HDM001017AS1)
