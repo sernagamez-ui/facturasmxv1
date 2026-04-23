@@ -208,6 +208,75 @@ function startHebDocumentoWait(page, timeoutMs) {
   };
 }
 
+function escapeRegExp(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Régimen / USO CFDI son mat-autocomplete: 8s en datacenter falla; el texto puede ser "601 - …" o "601- …".
+ * @param {import('playwright').Page} page
+ * @param {import('playwright').Locator} inputLoc
+ * @param {string} code
+ * @param {string} fileTag nombre corto para screenshot (regimen | uso_cfdi)
+ */
+async function hebSelectMatAutocomplete(page, inputLoc, code, fileTag) {
+  const c = String(code).trim();
+  if (!c) throw new Error(`HEB ${fileTag} vacío`);
+  const T = 25_000;
+  await inputLoc.click();
+  await inputLoc.fill('');
+  await page.waitForTimeout(200);
+  await inputLoc.fill(c);
+  await page.waitForTimeout(500);
+  await inputLoc.press('ArrowDown').catch(() => {});
+
+  const re = new RegExp(`^\\s*${escapeRegExp(c)}\\b`);
+  const byRe = page.locator('mat-option', { hasText: re });
+  try {
+    await byRe.first().waitFor({ state: 'visible', timeout: T });
+    await byRe.first().click();
+    await page.waitForTimeout(250);
+    return;
+  } catch {
+    console.log(`[HEB] ${fileTag}: sin match rápido con regex, recorriendo mat-option…`);
+  }
+
+  const opts = page.locator('mat-option');
+  const t0 = Date.now();
+  while (Date.now() - t0 < 12_000) {
+    const n = await opts.count();
+    for (let i = 0; i < n; i++) {
+      const el = opts.nth(i);
+      if (!(await el.isVisible().catch(() => false))) continue;
+      const raw = (await el.textContent()) || '';
+      const txt = raw.replace(/\s+/g, ' ').trim();
+      if (!txt) continue;
+      const reStart = new RegExp(`^\\s*${escapeRegExp(c)}\\b`);
+      const cu = c.toUpperCase();
+      const tu = txt.toUpperCase();
+      if (
+        reStart.test(txt) ||
+        tu.startsWith(cu + ' ') ||
+        tu.startsWith(cu + ' -') ||
+        tu.startsWith(cu + ' –') ||
+        tu.startsWith(cu + '—') ||
+        tu.startsWith(cu + '-')
+      ) {
+        await el.click();
+        console.log(`[HEB] ${fileTag} OK (fallback):`, txt.slice(0, 100));
+        await page.waitForTimeout(250);
+        return;
+      }
+    }
+    await page.waitForTimeout(350);
+  }
+
+  await page.screenshot({ path: hebScreenshotPath(`heb_fiscal_${fileTag}.png`) });
+  throw new Error(
+    `HEB no pudo elegir ${fileTag}  ${c}  (mat-autocomplete). Revisa heb_fiscal_${fileTag}.png`
+  );
+}
+
 async function _generarFacturaHEB(ticketData, userData) {
   const { sucursal, noTicket, fecha, total } = ticketData;
   const { rfc, nombre: razonSocial, cp, regimen: regimenFiscal, email, usoCfdi = 'G03' } = userData;
@@ -361,31 +430,14 @@ async function _generarFacturaHEB(ticketData, userData) {
     await page.waitForTimeout(800);
     console.log('[HEB] CP:', cp);
 
-    // ── Régimen fiscal — autocomplete: click + fill + elegir opción "612 - ..."
-    await fi.nth(3).click();
-    await fi.nth(3).fill(String(regimenFiscal));
-    await page.waitForTimeout(800);
-    const regimenOpt = page.locator('mat-option', {
-      hasText: new RegExp(`^\\s*${regimenFiscal}\\b`),
-    });
-    await regimenOpt.first().waitFor({ state: 'visible', timeout: 8_000 });
-    await regimenOpt.first().click();
-    await page.waitForTimeout(300);
+    // ── Régimen / USO CFDI — mat-autocomplete (8s en Railway suele quedarse corto; ver hebSelectMatAutocomplete)
+    await hebSelectMatAutocomplete(page, fi.nth(3), String(regimenFiscal), 'regimen');
     console.log('[HEB] Régimen:', regimenFiscal);
 
     await fi.nth(4).fill(email);
     console.log('[HEB] Email:', email);
 
-    // ── USO CFDI — autocomplete: click + fill + elegir opción "G03 - ..."
-    await fi.nth(5).click();
-    await fi.nth(5).fill(usoCfdi);
-    await page.waitForTimeout(800);
-    const usoOpt = page.locator('mat-option', {
-      hasText: new RegExp(`^\\s*${usoCfdi}\\b`),
-    });
-    await usoOpt.first().waitFor({ state: 'visible', timeout: 8_000 });
-    await usoOpt.first().click();
-    await page.waitForTimeout(300);
+    await hebSelectMatAutocomplete(page, fi.nth(5), String(usoCfdi), 'uso_cfdi');
     console.log('[HEB] Uso CFDI:', usoCfdi);
 
     await page.waitForTimeout(300);
