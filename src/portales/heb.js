@@ -9,6 +9,7 @@
 const fs   = require('fs');
 const path = require('path');
 const { chromium } = require('playwright');
+const { playwrightUseHeadless } = require('../playwrightHeadless');
 
 const HEB_SCREENSHOT_DIR = process.env.HEB_SCREENSHOT_DIR || '/tmp';
 function hebScreenshotPath(filename) {
@@ -218,7 +219,7 @@ async function _generarFacturaHEB(ticketData, userData) {
   const fechaNorm = normalizarFecha(fecha);
   const [anio, mes, dia] = fechaNorm.split('-');
 
-  const headless = process.env.HEB_HEADFUL !== '1';
+  const headless = playwrightUseHeadless(process.env.HEB_HEADFUL, '[HEB]', 'HEB_HEADFUL');
   const browser = await chromium.launch({ headless, args: ['--no-sandbox'] });
   const context = await browser.newContext({
     locale: 'es-MX',

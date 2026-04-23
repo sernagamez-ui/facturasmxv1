@@ -91,11 +91,17 @@ function normTicket(t) {
   return s;
 }
 
+/**
+ * Razón social para el formulario. Solo MAYÚSCULAS y espacios colapsados.
+ * No sustituir espacios por "+" aquí: URLSearchParams ya codifica espacio como +
+ * en application/x-www-form-urlencoded; si metemos "+" a mano, se envía %2B y el
+ * servidor recibe signos "+" literales (el SAT no coincide con el nombre del RFC).
+ */
 function nombreForm(nombre) {
   return String(nombre || '')
     .trim()
-    .toUpperCase()
-    .replace(/\s+/g, '+');
+    .replace(/\s+/g, ' ')
+    .toUpperCase();
 }
 
 function extraerUuidXml(xml) {
@@ -112,8 +118,32 @@ function logMcd(etapa, obj) {
   }
 }
 
+/** Respuestas object:error del PAC con detalles SAT (CFDI40xxx). */
+function extraerMensajesSatDesdeErrorPortal(obj) {
+  const codes = [];
+  const lines = [];
+  const details = obj?.details;
+  if (!Array.isArray(details)) return { text: '', codes };
+  for (const det of details) {
+    const errs = det?.errors;
+    if (!Array.isArray(errs)) continue;
+    for (const e of errs) {
+      if (e?.code) codes.push(String(e.code).trim().toUpperCase());
+      if (e?.description) lines.push(String(e.description).trim());
+    }
+  }
+  const uniq = [...new Set(lines)];
+  return { text: uniq.join('\n'), codes };
+}
+
+function esErrorNombreRazonReceptorSat(codes) {
+  return codes.some((c) => c === 'CFDI40144' || c === 'CFDI40145');
+}
+
 function snippetPortal(obj) {
   if (!obj || typeof obj !== 'object') return '';
+  const { text } = extraerMensajesSatDesdeErrorPortal(obj);
+  if (text) return text.slice(0, 900);
   const parts = [obj.msj, obj.error, obj.mensaje, obj.message].filter(Boolean);
   const t = parts.map(String).join(' — ');
   if (t) return t.slice(0, 500);
@@ -122,6 +152,29 @@ function snippetPortal(obj) {
   } catch {
     return '';
   }
+}
+
+function clasificarErrorTimbrado(d2) {
+  const sat = extraerMensajesSatDesdeErrorPortal(d2);
+  if (sat.text && esErrorNombreRazonReceptorSat(sat.codes)) {
+    return {
+      error: 'receptor_sat',
+      mensaje: sat.text,
+      portalSnippet: sat.text.slice(0, 900),
+    };
+  }
+  if (sat.text) {
+    return {
+      error: 'emision_error',
+      mensaje: sat.text,
+      portalSnippet: sat.text.slice(0, 900),
+    };
+  }
+  return {
+    error: 'emision_error',
+    mensaje: d2.msj || d2.error || JSON.stringify(d2).slice(0, 600),
+    portalSnippet: snippetPortal(d2),
+  };
 }
 
 function tieneFacturaXml(d) {
@@ -289,11 +342,12 @@ async function facturarMcDonalds({
         }
       }
 
+      const tim = clasificarErrorTimbrado(d2);
       return {
         ok: false,
-        error: 'emision_error',
-        mensaje: d2.msj || d2.error || JSON.stringify(d2).slice(0, 600),
-        portalSnippet: snippetPortal(d2),
+        error: tim.error,
+        mensaje: tim.mensaje,
+        portalSnippet: tim.portalSnippet,
         portalStatus: res2.status,
       };
     }

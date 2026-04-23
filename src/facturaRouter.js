@@ -435,18 +435,21 @@ async function procesarFactura(ticketData, userData, phone, outputDirOverride) {
           ticket_invalido:
             '🔍 El portal no reconoce el ticket. Verifica tienda, número de ticket, caja, fecha y total (deben coincidir con el ticket).',
           datos_fiscales: '⚠️ Faltan RFC, régimen fiscal o código postal para facturar en McDonald\'s.',
+          receptor_sat:
+            '⚠️ *El SAT rechazó el nombre del receptor.* En tu perfil Cotas, el nombre / razón social debe coincidir *tal cual* con la constancia de situación fiscal (no uses solo nombre comercial o abreviado; en personas morales suele ser la denominación completa). Corrige el perfil y vuelve a intentar.',
           emision_error:
-            '⚠️ El portal validó el ticket pero no pudo timbrar al confirmar. Revisa RFC, régimen y correo en tu perfil; si el mensaje del SAT aparece abajo, corrige según indique. Reintenta en unos minutos.',
+            '⚠️ El portal validó el ticket pero no pudo timbrar al confirmar. Revisa RFC, régimen y correo en tu perfil. Si abajo aparece un mensaje del SAT o del PAC, corrige según indique.',
           portal_forbidden:
             '🚫 El portal bloqueó la conexión (403). Desde la nube puede hacer falta proxy en México o ejecutar Cotas en red local.',
           proxy_auth: '🔐 El proxy respondió 407. Revisa credenciales en PROXY_URL_ROTATING.',
         };
-        const detalle =
-          resultado.error === 'emision_error' && resultado.portalSnippet
-            ? `\n\n📋 *Portal:* ${String(resultado.portalSnippet).replace(/\*/g, '').slice(0, 400)}`
+        const base =
+          errMap[resultado.error] || `⚠️ ${resultado.mensaje || resultado.error || 'Error al facturar'}`;
+        const detalleTxt =
+          resultado.mensaje && ['receptor_sat', 'emision_error'].includes(resultado.error)
+            ? `\n\n📋 *Detalle:*\n${String(resultado.mensaje).replace(/\*/g, '').slice(0, 1200)}`
             : '';
-        resultado.userMessage =
-          (errMap[resultado.error] || `⚠️ ${resultado.mensaje || resultado.error || 'Error al facturar'}`) + detalle;
+        resultado.userMessage = base + detalleTxt;
       }
 
     // ── No soportado ────────────────────────────────────────────────────

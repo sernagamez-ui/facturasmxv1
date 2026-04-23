@@ -23,6 +23,7 @@
 const fs = require('fs');
 const path = require('path');
 const { chromium } = require('playwright');
+const { playwrightUseHeadless } = require('../playwrightHeadless');
 const { getPlaywrightProxy } = require('../proxyAgent');
 
 const BASE = 'https://facturacion.walmartmexico.com.mx/frmDatos.aspx';
@@ -420,7 +421,7 @@ async function facturarWalmart({ tc, tr, userData }) {
   const trPadded = trClean.length >= 4 ? trClean : trClean.padStart(5, '0');
 
   const tag = '[Walmart]';
-  const headless = process.env.WALMART_HEADFUL !== '1';
+  const headless = playwrightUseHeadless(process.env.WALMART_HEADFUL, tag, 'WALMART_HEADFUL');
   const useProxy = process.env.WALMART_USE_PROXY === '1';
   const proxy = useProxy ? getPlaywrightProxy('rotating') : undefined;
   if (useProxy) console.log(`${tag} Playwright vía PROXY_URL_ROTATING`);
