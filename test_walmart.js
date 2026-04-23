@@ -13,6 +13,7 @@
  * Datos fiscales (por defecto los del test_homedepot; sobreescribe con env):
  *   WALMART_TEST_RFC, WALMART_TEST_CP, WALMART_TEST_REGIMEN, WALMART_TEST_EMAIL,
  *   WALMART_TEST_NOMBRE, WALMART_TEST_USO (ej. G03)
+ *   WALMART_TIMEOUT_MS — milis por acción (default 120000). El portal usa ASP.NET AJAX lento.
  *
  * Ejemplos:
  *   node test_walmart.js 220426193021 01391 --dry-run
