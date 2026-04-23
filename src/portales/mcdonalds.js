@@ -103,6 +103,31 @@ function extraerUuidXml(xml) {
   return m ? m[1].toUpperCase() : null;
 }
 
+function logMcd(etapa, obj) {
+  try {
+    const s = typeof obj === 'string' ? obj : JSON.stringify(obj);
+    console.log(`[McDonalds] ${etapa}:`, s.length > 1400 ? `${s.slice(0, 1400)}…` : s);
+  } catch {
+    console.log(`[McDonalds] ${etapa}:`, String(obj).slice(0, 400));
+  }
+}
+
+function snippetPortal(obj) {
+  if (!obj || typeof obj !== 'object') return '';
+  const parts = [obj.msj, obj.error, obj.mensaje, obj.message].filter(Boolean);
+  const t = parts.map(String).join(' — ');
+  if (t) return t.slice(0, 500);
+  try {
+    return JSON.stringify(obj).slice(0, 500);
+  } catch {
+    return '';
+  }
+}
+
+function tieneFacturaXml(d) {
+  return !!(d && d.object === 'invoice' && d.data && d.data.xml);
+}
+
 /**
  * @param {object} p
  * @param {string} p.number_store — código de tienda (ej. "0807", "0156")
@@ -182,6 +207,7 @@ async function facturarMcDonalds({
       headers: headersForm(),
     });
     const val = JSON.parse(resVal.data);
+    logMcd('validar ticket (status_ticket=3)', val);
     if (val.status === 5 || /facturado|previously/i.test(String(val.previously || ''))) {
       return { ok: false, error: 'ya_facturado', mensaje: val.msj || 'Ticket ya facturado.' };
     }
@@ -232,25 +258,43 @@ async function facturarMcDonalds({
       headers: headersForm(),
     });
     const d1 = JSON.parse(res1.data);
+    logMcd('emisión paso A (status_form=0)', d1);
 
-    if (d1.object === 'invoice' && d1.data?.xml) {
+    if (tieneFacturaXml(d1)) {
       return finalizeInvoice(d1, outputDir);
     }
 
     // Confirmación intermedia (HAR: status 1 — "¿Estás seguro?" → mismo POST con status_form=1)
     if (d1.status === 1) {
-      const res2 = await client.post(`${BASE}/index.php/request`, buildIssueBody(1), {
-        ...mcdHttp(),
-        headers: headersForm(),
-      });
-      const d2 = JSON.parse(res2.data);
-      if (d2.object === 'invoice' && d2.data?.xml) {
+      const postConfirm = async () =>
+        client.post(`${BASE}/index.php/request`, buildIssueBody(1), {
+          ...mcdHttp(),
+          headers: headersForm(),
+        });
+
+      let res2 = await postConfirm();
+      let d2 = JSON.parse(res2.data);
+      logMcd('emisión paso B (status_form=1)', d2);
+
+      if (tieneFacturaXml(d2)) {
         return finalizeInvoice(d2, outputDir);
       }
+
+      if (d2.status === 1) {
+        res2 = await postConfirm();
+        d2 = JSON.parse(res2.data);
+        logMcd('emisión paso B2 (status_form=1 reintento)', d2);
+        if (tieneFacturaXml(d2)) {
+          return finalizeInvoice(d2, outputDir);
+        }
+      }
+
       return {
         ok: false,
         error: 'emision_error',
-        mensaje: d2.msj || d2.error || JSON.stringify(d2).slice(0, 400),
+        mensaje: d2.msj || d2.error || JSON.stringify(d2).slice(0, 600),
+        portalSnippet: snippetPortal(d2),
+        portalStatus: res2.status,
       };
     }
 
@@ -258,6 +302,7 @@ async function facturarMcDonalds({
       ok: false,
       error: 'portal_error',
       mensaje: d1.msj || d1.error || JSON.stringify(d1).slice(0, 400),
+      portalSnippet: snippetPortal(d1),
     };
   } catch (err) {
     const status = err.response?.status;
