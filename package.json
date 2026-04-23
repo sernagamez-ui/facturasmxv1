@@ -8,7 +8,8 @@
     "start": "node server.js",
     "smoke:oxxo": "node scripts/smoke-oxxo-portal.js",
     "smoke:mcdonalds": "node scripts/smoke-mcdonalds.js",
-    "smoke:heb": "node scripts/smoke-heb.js"
+    "smoke:heb": "node scripts/smoke-heb.js",
+    "test:walmart": "node test_walmart.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.24.0",

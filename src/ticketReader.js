@@ -32,6 +32,7 @@ const COMERCIO_CATEGORIA_FIJA = {
   sieveEleven: 'tienda_conveniencia',
   officedepot: 'papeleria_oficina',
   homedepot: 'ferreteria_hogar',
+  walmart:   'supermercado',
   mcdonalds: 'restaurante',
   alsea:     'restaurante',
   carlsjr:   'restaurante',
@@ -145,6 +146,7 @@ function fusionarCategoriaComercio(comercio, data) {
 async function leerTicket(imageBuffer, mimeType = 'image/jpeg') {
   // ─── Paso 1: siempre leer QR si existe; parsers específicos evitan depender de OCR ─
   const qrData = await leerQR(imageBuffer);
+  let mcdSurveyHint = null;
   if (qrData) {
     const ticketOxxo = parsearQROxxoGas(qrData);
     if (ticketOxxo) {
@@ -168,9 +170,14 @@ async function leerTicket(imageBuffer, mimeType = 'image/jpeg') {
         metodoPago: null,
       };
     }
-    console.log(
-      '[ticketReader] QR presente, formato no reconocido; datos por Vision (p. ej. promos o otro comercio)'
-    );
+    mcdSurveyHint = parseMcExperienciaSurveyQr(qrData);
+    if (mcdSurveyHint) {
+      console.log('[ticketReader] QR encuesta McDonald\'s (refuerzo opcional tienda/fecha):', mcdSurveyHint);
+    } else {
+      console.log(
+        '[ticketReader] QR presente, formato no reconocido; datos por Vision (p. ej. promos o otro comercio)'
+      );
+    }
   }
 
   // ─── Paso 2: Claude Vision (comercio + campos) ───────────────────────────
@@ -189,7 +196,8 @@ async function leerTicket(imageBuffer, mimeType = 'image/jpeg') {
     comercio === 'mcdonalds' ||
     comercio === 'petro7' ||
     comercio === 'officedepot' ||
-    comercio === 'homedepot'
+    comercio === 'homedepot' ||
+    comercio === 'walmart'
       ? MODEL_SONNET
       : MODEL;
 
@@ -235,6 +243,10 @@ async function leerTicket(imageBuffer, mimeType = 'image/jpeg') {
     } else if (normalized.itu != null && String(normalized.itu).trim() !== '') {
       normalized.itu = normalizeItuOfficeDepot(String(normalized.itu));
     }
+  }
+
+  if (comercio === 'mcdonalds' && mcdSurveyHint) {
+    fusionarMcdSurveyHint(normalized, mcdSurveyHint);
   }
 
   return normalized;
@@ -398,6 +410,65 @@ async function leerCodigoBarras7Eleven(imageBuffer) {
   }
 
   return extracted;
+}
+
+// ─────────────────────────────────────────────
+// QR — encuesta McDonald's (mcexperienciasurvey.com): no es facturación; refuerzo tienda/fecha
+// ─────────────────────────────────────────────
+
+/**
+ * @returns {null | { storeRaw: string, storePadded: string, fechaYmd: string|null, orderId: string|null, time: string|null }}
+ */
+function parseMcExperienciaSurveyQr(qrString) {
+  if (!qrString || typeof qrString !== 'string') return null;
+  const s = qrString.trim();
+  if (!/mcexperienciasurvey\.com/i.test(s)) return null;
+  try {
+    const u = new URL(s);
+    const store = u.searchParams.get('store');
+    const date = u.searchParams.get('date');
+    const orderId = u.searchParams.get('orderId');
+    const time = u.searchParams.get('time');
+    if (!store && !date) return null;
+    let storePadded = '';
+    if (store) {
+      const d = String(store).replace(/\D/g, '');
+      storePadded = d.length <= 4 ? d.padStart(4, '0') : d;
+    }
+    let fechaYmd = null;
+    if (date && /^\d{8}$/.test(String(date))) {
+      const ds = String(date);
+      fechaYmd = `${ds.slice(0, 4)}-${ds.slice(4, 6)}-${ds.slice(6, 8)}`;
+    }
+    return {
+      storeRaw: store || '',
+      storePadded,
+      fechaYmd,
+      orderId: orderId || null,
+      time: time || null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function fusionarMcdSurveyHint(normalized, hint) {
+  if (!hint) return;
+  normalized.mcdSurveyHint = hint;
+  const vStore = normalized.number_store != null ? String(normalized.number_store).replace(/\D/g, '') : '';
+  const hStore = hint.storePadded.replace(/\D/g, '');
+  if (!vStore && hStore) {
+    normalized.number_store = hint.storePadded;
+    console.log('[ticketReader] McDonald\'s: number_store desde QR encuesta:', hint.storePadded);
+  } else if (vStore && hStore && vStore !== hStore) {
+    console.warn(
+      `[ticketReader] McDonald's: tienda ticket=${vStore} vs QR encuesta=${hStore} (se usa la del ticket impreso)`
+    );
+  }
+  if (!normalized.fecha && hint.fechaYmd) {
+    normalized.fecha = hint.fechaYmd;
+    console.log('[ticketReader] McDonald\'s: fecha desde QR encuesta:', hint.fechaYmd);
+  }
 }
 
 // ─────────────────────────────────────────────
@@ -671,6 +742,7 @@ bww
 mcdonalds
 officedepot
 homedepot
+walmart
 general
 
 REGLAS:
@@ -697,6 +769,7 @@ REGLAS:
 - Si ves "MCDONALDS", "McDonald's", "MCDONALD'S", "RESTAURANTES ADMX", facturacionmcdonalds.com.mx -> responde: mcdonalds
 - Si ves "OFFICE DEPOT", "OFFICEMAX", "Office Depot", "OfficeMax", "ODMX", facturacion.officedepot.com.mx -> responde: officedepot
 - Si ves "HOME DEPOT", "THE HOME DEPOT", "HDM001017AS1", "homedepot.com.mx" o el logo naranja cuadrado -> responde: homedepot
+- Si ves "WALMART", "WAL-MART", "WALMART SUPERCENTER", "Sam's Club", "SAMS CLUB", "Bodega Aurrera", "SUPERCENTER", RFC "NWM-970924" o facturación walmartmexico -> responde: walmart
 - Cualquier otro comercio -> responde: general`,
         },
       ],
@@ -711,6 +784,7 @@ REGLAS:
     'mcdonalds',
     'officedepot',
     'homedepot',
+    'walmart',
     'general',
   ];
   return valid.includes(val) ? val : 'general';
@@ -729,6 +803,7 @@ function elegirPrompt(comercio) {
     case 'mcdonalds': return promptMcDonalds();
     case 'officedepot': return promptOfficeDepot();
     case 'homedepot':   return promptHomeDepot();
+    case 'walmart':     return promptWalmart();
     default:        return promptGeneral();
   }
 }
@@ -1014,32 +1089,31 @@ function promptMcDonalds() {
   return `Analiza este ticket de McDonald's México (RESTAURANTES ADMX u operador McDonald's) para el portal www.facturacionmcdonalds.com.mx.
 
 El portal pide estos datos (deben coincidir EXACTAMENTE con el ticket):
-- Número de tienda / restaurante (suele ser 4 dígitos cerca del nombre de la tienda, ej. "0807")
-- Nro. Ticket (número de ticket; a veces con ceros a la izquierda, ej. "000027206")
-- Caja o Reg. (número de caja / registro, ej. "01")
-- Fecha del ticket
-- Total a pagar (Total comedor / total con IVA, el que corresponde a la venta)
+- Código de tienda: suele ir en la MISMA línea INMEDIATAMENTE ANTES del nombre del restaurante (ej. "0807" antes de "MCDONALDS SAMARA").
+- Nro. Ticket: el valor COMPLETO tras la etiqueta "Nro. Ticket:" u homóloga, con TODOS los ceros a la izquierda (ej. "000027206"). Nunca sustituyas por solo los últimos dígitos.
+- Caja: el número en "Reg." o "Reg" (ej. "01"), NO el número de empleado en "Cajero:".
+- Fecha: la de la compra (ej. bajo "Fecha:"). En México el ticket casi siempre es DD/MM/AAAA (día primero); convierte a YYYY-MM-DD. Si el año en el ticket es distinto al actual, respeta el año impreso.
+- Total: el monto de la venta a facturar con IVA. Prioriza la línea "Total Comedor c/IVA" o el total de comedor equivalente. NO uses "Efectivo", "Cambio", ni el renglón "TOTAL IVA 16%" (ese suele ser solo el impuesto, no el total de la venta). Si SubTotal y Total Comedor c/IVA coinciden, ese es el total.
 
 CAMPOS EN JSON:
 {
   "encontrado": true,
   "comercio": "mcdonalds",
-  "number_store": "código de tienda solo dígitos (string), típicamente 4 dígitos con ceros a la izquierda si aplica",
-  "num_ticket": "número de ticket tal como en 'Nro. Ticket' o equivalente — incluye ceros iniciales si aparecen en el ticket",
-  "num_caja": "número de caja o 'Reg.' solo dígitos (string), ej. '01' o '76'",
+  "number_store": "solo dígitos del código de tienda (string), típicamente 4 dígitos",
+  "num_ticket": "string: valor íntegro de Nro. Ticket con ceros a la izquierda tal como en el ticket",
+  "num_caja": "solo dígitos de Reg. (string), ej. '01' o '76'",
   "fecha": "YYYY-MM-DD",
-  "total": número decimal (total de la compra con IVA que debe facturarse),
+  "total": número decimal (total de la venta con IVA a facturar),
   "metodoPago": "efectivo" o "tarjeta" o null,
   "categoria": "restaurante"
 }
 
 REGLAS:
-- NO uses el número de pedido (#orden) como num_ticket; usa el valor de "Nro. Ticket" / folio de facturación.
-- NO uses el importe en efectivo ni el cambio como total; usa el total de la venta (ej. Total comedor c/IVA).
-- number_store NO es el número de empleado ni el # de pedido.
+- NO uses "ORD:", "#orden" ni número de pedido como num_ticket.
+- NO uses el ID largo de "Cajero:" como num_caja ni como number_store.
+- number_store NO es el número de cajero ni el de pedido.
 - Lee dígitos con cuidado (0 vs O, 1 vs 7).
-- Si la fecha viene DD/MM/AAAA, convierte a YYYY-MM-DD. Año actual ${anioActual}.
-- "categoria" es "restaurante" (alimentos preparados en expendio de comida).
+- "categoria" es "restaurante".
 
 Responde SOLO con el JSON, sin texto adicional.` + SUFIJO_CATEGORIA_VISION;
 }
@@ -1135,6 +1209,39 @@ REGLAS CRÍTICAS:
 6. Si algún campo no se ve claramente, usa null (EXCEPTO noTicket que es obligatorio).
 
 Responde SOLO con el JSON, sin texto adicional, sin markdown.`;
+}
+
+// ─────────────────────────────────────────────
+// PROMPT — Walmart / Sam's / Aurrera (México, grupo Walmex)
+// ─────────────────────────────────────────────
+
+function promptWalmart() {
+  return `Analiza este ticket de Walmart, Sam's Club o Bodega Aurrera (México) y extrae los datos en formato JSON.
+
+En la parte baja, sobre el código de barras, aparece la leyenda **TC#** seguida de un número largo (a menudo en grupos separados por espacios). Ese es el *código de ticket* — copia TODOS los dígitos en "noTicket" sin espacios ni guiones.
+
+En la parte media o superior a veces aparece **TR#** o "TR" o "TRANS" seguido del **número de transacción** (3 a 5 dígitos, a veces con ceros a la izquierda, ej. 00986, 01391). Cópialo en "tr" solo como dígitos (sin ceros extra si el ticket no los trae, pero conserva el valor exacto; si ves "TR# 00986", tr=986 o "00986" según se vea, preferimos el número tal cual con dígitos).
+
+También puede aparecer **TDA** (número de tienda) — no es el TC# ni el TR#.
+
+CAMPOS EN JSON:
+{
+  "encontrado": true,
+  "comercio": "walmart",
+  "noTicket": "solo dígitos del TC# (código de ticket), sin espacios",
+  "tr": "solo dígitos del TR# (número de transacción)",
+  "fecha": "YYYY-MM-DD o null",
+  "total": número o null,
+  "categoria": "supermercado"
+}
+
+REGLAS:
+- "noTicket" = únicamente el TC# bajo el código de barras (línea TC#), 10 a 28 dígitos en la práctica.
+- "tr" = únicamente el TR# (número de transacción), NO el TDA, NO el número de caja, NO el de operador.
+- No confundas 0 (cero) con O (letra) ni 1 con l.
+- "categoria" para este grupo es "supermercado".
+
+Responde SOLO con el JSON, sin markdown ni texto adicional.` + SUFIJO_CATEGORIA_VISION;
 }
 
 // ─────────────────────────────────────────────

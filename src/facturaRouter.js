@@ -13,6 +13,7 @@ const { generarFacturaHEB }    = require('./portales/heb');
 const { facturarAlsea }        = require('./portales/alsea');
 const { facturar7Eleven }     = require('./portales/7eleven');
 const { facturarHomeDepot }   = require('./portales/homedepot');
+const { facturarWalmartFromTicket } = require('./portales/walmart');
 const { facturarOrigonCdc, ORIGON_CDC_CONFIG } = require('./portales/origonCdc');
 const { facturarMcDonalds } = require('./portales/mcdonalds');
 const { facturar: facturarOfficeDepot, buildUsuario: buildUsuarioOfficeDepot } = require('./portales/officedepot');
@@ -341,6 +342,16 @@ async function procesarFactura(ticketData, userData, phone, outputDirOverride) {
         outputDir,
       });
 
+    // ── Walmart México (Walmex: Walmart, Sam's, Bodega Aurrera) — Playwright + correo ──
+    } else if (comercio === 'walmart') {
+      const trRaw = ticketData.tr ?? ticketData.numTransaccion;
+      validar({ ...ticketData, tr: trRaw }, ['noTicket', 'tr'], 'Walmart');
+      resultado = await facturarWalmartFromTicket({
+        noTicket: String(ticketData.noTicket).replace(/\D/g, ''),
+        tr: String(trRaw).replace(/\D/g, ''),
+        userData,
+      });
+
     // ── Grupo Galería (Origon CDC): Carl's Jr., IHOP, BWW, etc. ───────────
     } else if (ORIGON_CDC_BRANDS.has(comercio)) {
       const branchCode = ticketData.branchCode ?? ticketData.tienda;
@@ -424,12 +435,18 @@ async function procesarFactura(ticketData, userData, phone, outputDirOverride) {
           ticket_invalido:
             '🔍 El portal no reconoce el ticket. Verifica tienda, número de ticket, caja, fecha y total (deben coincidir con el ticket).',
           datos_fiscales: '⚠️ Faltan RFC, régimen fiscal o código postal para facturar en McDonald\'s.',
+          emision_error:
+            '⚠️ El portal validó el ticket pero no pudo timbrar al confirmar. Revisa RFC, régimen y correo en tu perfil; si el mensaje del SAT aparece abajo, corrige según indique. Reintenta en unos minutos.',
           portal_forbidden:
             '🚫 El portal bloqueó la conexión (403). Desde la nube puede hacer falta proxy en México o ejecutar Cotas en red local.',
           proxy_auth: '🔐 El proxy respondió 407. Revisa credenciales en PROXY_URL_ROTATING.',
         };
+        const detalle =
+          resultado.error === 'emision_error' && resultado.portalSnippet
+            ? `\n\n📋 *Portal:* ${String(resultado.portalSnippet).replace(/\*/g, '').slice(0, 400)}`
+            : '';
         resultado.userMessage =
-          errMap[resultado.error] || `⚠️ ${resultado.mensaje || resultado.error || 'Error al facturar'}`;
+          (errMap[resultado.error] || `⚠️ ${resultado.mensaje || resultado.error || 'Error al facturar'}`) + detalle;
       }
 
     // ── No soportado ────────────────────────────────────────────────────
@@ -498,6 +515,7 @@ function armarMensajeExito(resultado, ticketData, userData, comercio) {
     mcdonalds: 'McDonald\'s',
     officedepot: 'Office Depot',
     homedepot: 'Home Depot',
+    walmart: 'Walmart',
   };
   const nombre = nombres[comercio] || comercio;
 
@@ -556,6 +574,7 @@ function armarMensajeError(error, comercio) {
     mcdonalds: 'McDonald\'s',
     officedepot: 'Office Depot',
     homedepot: 'Home Depot',
+    walmart: 'Walmart',
   };
   const nombre = nombres[comercio] || comercio;
 
@@ -653,6 +672,7 @@ function comercioFacturableAutomatico(comercio) {
     'mcdonalds',
     'officedepot',
     'homedepot',
+    'walmart',
   ].includes(comercio);
 }
 
@@ -673,6 +693,7 @@ function etiquetaComercio(comercio) {
     mcdonalds: "McDonald's",
     officedepot: 'Office Depot',
     homedepot: 'Home Depot',
+    walmart: 'Walmart',
   };
   return n[comercio] || comercio;
 }
