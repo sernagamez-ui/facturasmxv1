@@ -519,25 +519,50 @@ async function facturarMcDonalds({
 }
 
 function finalizeInvoice(data, outputDir) {
-  const b64 = data.data.xml;
+  const payload = data?.data;
+  if (!payload || !payload.xml) {
+    return { ok: false, error: 'xml_invalido', mensaje: 'Respuesta sin XML en data.' };
+  }
+
   let xmlStr;
   try {
-    xmlStr = Buffer.from(b64, 'base64').toString('utf-8');
+    xmlStr = Buffer.from(payload.xml, 'base64').toString('utf-8');
   } catch {
     return { ok: false, error: 'xml_invalido', mensaje: 'Respuesta sin XML válido.' };
   }
 
   fs.mkdirSync(outputDir, { recursive: true });
-  const uuid = extraerUuidXml(xmlStr) || `mcd_${Date.now()}`;
-  const safeUuid = String(uuid).replace(/[^\w-]/g, '_');
+  const uuidVal = extraerUuidXml(xmlStr) || `mcd_${Date.now()}`;
+  const safeUuid = String(uuidVal).replace(/[^\w-]/g, '_');
   const xmlPath = path.join(outputDir, `mcdonalds_${safeUuid}.xml`);
   fs.writeFileSync(xmlPath, xmlStr, 'utf-8');
+
+  /** El portal también envía PDF en base64 (invoice_s.js: results.data.pdf). */
+  let pdfPath = null;
+  const b64Pdf = payload.pdf;
+  if (b64Pdf != null && String(b64Pdf).trim() !== '') {
+    try {
+      const pdfBuf = Buffer.from(String(b64Pdf).replace(/\s/g, ''), 'base64');
+      const head = pdfBuf.slice(0, 5).toString('latin1');
+      if (pdfBuf.length > 500 && head.startsWith('%PDF')) {
+        pdfPath = path.join(outputDir, `mcdonalds_${safeUuid}.pdf`);
+        fs.writeFileSync(pdfPath, pdfBuf);
+        console.log('[McDonalds] PDF guardado:', pdfPath, `(${pdfBuf.length} bytes)`);
+      } else {
+        console.warn('[McDonalds] data.pdf presente pero no es PDF binario válido.');
+      }
+    } catch (e) {
+      console.warn('[McDonalds] No se pudo decodificar data.pdf:', e.message);
+    }
+  } else {
+    console.log('[McDonalds] Respuesta sin data.pdf; solo XML.');
+  }
 
   return {
     ok: true,
     xmlPath,
     uuid: extraerUuidXml(xmlStr),
-    pdfPath: null,
+    pdfPath,
     envioPorCorreo: false,
   };
 }
