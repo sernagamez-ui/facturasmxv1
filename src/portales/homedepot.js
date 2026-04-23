@@ -345,7 +345,10 @@ async function facturarHomeDepot({ noTicket, userData, outputDir }) {
   const cliente = {
     rfc,
     nombre:             userData.nombre || userData.razonSocial || '',
-    codigoPostal:       String(userData.codigoPostal || userData.cpFiscal || '').trim(),
+    // Telegram/onboarding guarda el CP en `cp` (igual que petro7, oxxo, mcdonald, officedepot)
+    codigoPostal:       String(
+      userData.codigoPostal || userData.cpFiscal || userData.cp || ''
+    ).replace(/\D/g, '').slice(0, 5),
     claveRegimenFiscal: String(userData.regimen || userData.claveRegimenFiscal || '612').trim(),
     claveUsoCfdi:       String(userData.usoCfdi || userData.claveUsoCfdi || 'G03').trim(),
     correo:             String(userData.correo || userData.email || '').trim(),
