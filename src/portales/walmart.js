@@ -13,6 +13,9 @@
  *
  * Tiempos: el sitio usa UpdatePanel; a veces “refresca” o tarda en los postbacks. Por defecto
  * 120s por acción (sobre 25s de Playwright). Ajusta con WALMART_TIMEOUT_MS (milis).
+ *
+ * Avisos emergentes: el portal muestra modales (p. ej. actualización a CFDI 4.0) que bloquean
+ * el flujo; se cierran con `cerrarPopupsWalmart` + `dialog.accept()` en alert nativos.
  */
 
 'use strict';
@@ -57,6 +60,114 @@ async function waitForAjaxPost(p, pathFragment, t) {
 }
 
 /**
+ * alert/confirm/prompt del navegador (raro pero posible en WebForms viejos).
+ * @param {import('playwright').Page} page
+ */
+function attachWalmartDialogHandler(page) {
+  page.on('dialog', async (dialog) => {
+    try {
+      await dialog.accept();
+    } catch {
+      /* */
+    }
+  });
+}
+
+/**
+ * Modales internos: avisos de CFDI 4.0, términos, “Entendido”, etc. (bloquean clics al formulario).
+ * @param {import('playwright').Page} page
+ * @param {string} tag
+ */
+async function cerrarPopupsWalmart(page, tag) {
+  const labelBtn =
+    /^(Aceptar|Acepto|Entendido|Entiendo|De acuerdo|Cerrar|OK|Continuar|Siguiente|Confirmar)$/i;
+  let cerrados = 0;
+
+  for (let ronda = 0; ronda < 10; ronda++) {
+    let hubo = false;
+
+    const contenedores = page.locator(
+      [
+        '[role="dialog"]',
+        '.ui-dialog:visible',
+        '[class*="modal-dialog"]:visible',
+        '[class*="Modal"]:visible',
+        '[id*="Mensaje"]:visible',
+        '[id*="Popup"]:visible',
+        '[id*="modal"]:visible',
+      ].join(', ')
+    );
+
+    const nC = await contenedores.count();
+    for (let i = 0; i < Math.min(nC, 5); i++) {
+      const box = contenedores.nth(i);
+      if (!(await box.isVisible().catch(() => false))) continue;
+      const btn = box
+        .locator('button, input[type="button"], input[type="submit"], a[href="#"], a[role="button"]')
+        .filter({ hasText: /aceptar|entendido|acepto|cerrar|de acuerdo|ok|continuar|siguiente|confirmar/i });
+      if (await btn.first().isVisible().catch(() => false)) {
+        await btn.first().click({ timeout: 4_000 }).catch(() => {});
+        hubo = true;
+        cerrados++;
+        await page.waitForTimeout(500);
+        break;
+      }
+    }
+
+    if (!hubo) {
+      const generico = page.getByRole('button', { name: labelBtn });
+      const gc = await generico.count();
+      for (let j = 0; j < Math.min(gc, 12); j++) {
+        const b = generico.nth(j);
+        if (!(await b.isVisible().catch(() => false))) continue;
+        const inDialog = await b.evaluate(
+          (el) =>
+            !!el.closest(
+              '[role="dialog"], .ui-dialog, [class*="modal"], [id*="Mensaje"], [id*="Popup"], [id*="Aviso"]'
+            )
+        ).catch(() => false);
+        if (inDialog) {
+          await b.click({ timeout: 4_000 }).catch(() => {});
+          hubo = true;
+          cerrados++;
+          await page.waitForTimeout(500);
+          break;
+        }
+      }
+    }
+
+    if (!hubo) {
+      const alts = page.locator('input[type="button"][value], input[type="submit"][value]');
+      const ac = await alts.count();
+      for (let k = 0; k < Math.min(ac, 20); k++) {
+        const inp = alts.nth(k);
+        const v = (await inp.getAttribute('value').catch(() => '')) || '';
+        if (!/aceptar|entendido|acepto|cerrar|ok|continuar|siguiente/i.test(v)) continue;
+        if (!(await inp.isVisible().catch(() => false))) continue;
+        const inOvl = await inp
+          .evaluate((el) =>
+            !!el.closest(
+              '[role="dialog"], .ui-dialog, [class*="modal"], [id*="Mensaje"], [id*="Popup"]'
+            )
+          )
+          .catch(() => false);
+        if (inOvl) {
+          await inp.click({ timeout: 4_000 }).catch(() => {});
+          hubo = true;
+          cerrados++;
+          await page.waitForTimeout(500);
+          break;
+        }
+      }
+    }
+
+    if (!hubo) break;
+  }
+
+  if (cerrados > 0) console.log(`${tag} modales/avisos cerrados (${cerrados} clic[s])`);
+}
+
+/**
  * Tras "Aceptar" en datos fiscales: el portal puede (a) ir a frmReportAdmin, (b) mostrar
  * "ya facturado" / error sin cambiar de URL, (c) mostrar "Continuar" (forma de pago).
  * No uses solo waitForURL(frmReportAdmin) — si (b), hace timeout inútil.
@@ -73,8 +184,10 @@ async function esperarReportAdminTrasFiscal(page, maxMs, tag) {
 
   const t0 = Date.now();
   let clickedContinuar = false;
+  let tick = 0;
 
   while (Date.now() - t0 < maxMs) {
+    if (tick++ % 6 === 0) await cerrarPopupsWalmart(page, tag);
     const url = page.url();
     if (url.includes('frmReportAdmin')) return { kind: 'admin' };
 
@@ -224,14 +337,19 @@ async function facturarWalmart({ tc, tr, userData }) {
   try {
     const context = await browser.newContext({ locale: 'es-MX', userAgent: UA, viewport: { width: 1280, height: 900 } });
     page = await context.newPage();
+    attachWalmartDialogHandler(page);
     page.setDefaultTimeout(T);
     page.setDefaultNavigationTimeout(T);
     console.log(`${tag} timeout acciones ${T}ms (WALMART_TIMEOUT_MS)`);
 
     console.log(`${tag} Cargando ${BASE}`);
     await page.goto(BASE, { waitUntil: 'domcontentloaded', timeout: T });
+    await page.waitForTimeout(1000);
+    await cerrarPopupsWalmart(page, tag);
+    await cerrarPopupsWalmart(page, tag);
     await page.locator('#ctl00_ContentPlaceHolder1_txtTC').waitFor({ state: 'visible', timeout: T });
-    await page.waitForTimeout(800);
+    await page.waitForTimeout(400);
+    await cerrarPopupsWalmart(page, tag);
 
     await page.locator('#ctl00_ContentPlaceHolder1_txtMemRFC').fill(rfc);
     await page.locator('#ctl00_ContentPlaceHolder1_txtCP').fill(cp);
@@ -240,16 +358,19 @@ async function facturarWalmart({ tc, tr, userData }) {
     console.log(`${tag} Datos ticket: TC=${tcClean.length}d TR=${trPadded} RFC=${rfc}`);
 
     for (const id of ['btnInfo', 'btnTR']) {
+      await cerrarPopupsWalmart(page, tag);
       const el = page.locator(`#ctl00_ContentPlaceHolder1_${id}`);
       await el.waitFor({ state: 'visible', timeout: T });
       await el.click();
       await waitForAjaxPost(page, 'frmDatos', T);
+      await cerrarPopupsWalmart(page, tag);
     }
 
     await Promise.all([
       page.waitForURL('**/frmRFCEdita**', { timeout: T }),
       page.locator('#ctl00_ContentPlaceHolder1_btnAceptar').click(),
     ]);
+    await cerrarPopupsWalmart(page, tag);
     console.log(`${tag} frmRFCEdita OK`);
 
     await page.locator('#ctl00_ContentPlaceHolder1_txtRFC').fill(rfc);
@@ -330,6 +451,7 @@ async function facturarWalmart({ tc, tr, userData }) {
       };
     }
     console.log(`${tag} frmReportAdmin URL`);
+    await cerrarPopupsWalmart(page, tag);
 
     await page.locator('#ctl00_ContentPlaceHolder1_rdCorreo').check().catch(() =>
       page
@@ -345,6 +467,7 @@ async function facturarWalmart({ tc, tr, userData }) {
     }
 
     const errBefore = page.locator('.Error, [class*="Error"], #lblError, span[id*="lbl"]').first();
+    await cerrarPopupsWalmart(page, tag);
     await page.locator('#ctl00_ContentPlaceHolder1_btnFacturar').click();
 
     await page.waitForTimeout(4000);
