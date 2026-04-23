@@ -442,11 +442,20 @@ async function procesarFactura(ticketData, userData, phone, outputDirOverride) {
           portal_forbidden:
             '🚫 El portal bloqueó la conexión (403). Desde la nube puede hacer falta proxy en México o ejecutar Cotas en red local.',
           proxy_auth: '🔐 El proxy respondió 407. Revisa credenciales en PROXY_URL_ROTATING.',
+          mcd_red:
+            '📡 *Conexión interrumpida* al timbrar en McDonald\'s (red, proxy o reinicio del servidor). Espera a que el deploy termine y reintenta.',
+          mcd_error:
+            '⚠️ Error inesperado con el portal de McDonald\'s. Revisa logs `[McDonalds] excepción:` en el servidor.',
+          mcd_timeout:
+            '⏱️ *Tiempo agotado (504 u otro gateway)* al hablar con McDonald\'s o con el proxy. El timbrado puede tardar; reintenta en 2–5 min. Si pasa seguido, sube el timeout de tu hosting o prueba otra red/proxy.',
+          mcd_respuesta_portal:
+            '⚠️ McDonald\'s devolvió una respuesta inesperada al *confirmar* la factura (a veces HTML o vacío por proxy/red). Reintenta; si sigue, prueba sin proxy o desde otra red.',
         };
         const base =
           errMap[resultado.error] || `⚠️ ${resultado.mensaje || resultado.error || 'Error al facturar'}`;
         const detalleTxt =
-          resultado.mensaje && ['receptor_sat', 'emision_error'].includes(resultado.error)
+          resultado.mensaje &&
+          ['receptor_sat', 'emision_error', 'mcd_error', 'mcd_respuesta_portal'].includes(resultado.error)
             ? `\n\n📋 *Detalle:*\n${String(resultado.mensaje).replace(/\*/g, '').slice(0, 1200)}`
             : '';
         resultado.userMessage = base + detalleTxt;
@@ -463,6 +472,16 @@ async function procesarFactura(ticketData, userData, phone, outputDirOverride) {
 
   } catch (err) {
     const raw = String(err.message ?? err);
+    // Axios ante 502/503/504: mensaje técnico en inglés — no confundir con “foto ilegible”
+    if (/Request failed with status code (502|503|504)|status code (502|503|504)/i.test(raw)) {
+      return {
+        ok: false,
+        comercio,
+        error: 'gateway_timeout',
+        userMessage:
+          '⏱️ *Tiempo agotado en la red* (HTTP 502/503/504). Suele ser el portal, el proxy o el límite de tiempo del hosting. No es un problema de la foto. Reintenta en 2–5 minutos.',
+      };
+    }
     const hebTextoLargo =
       comercio === 'heb' &&
       /HEB solo correo|pantalla muestra|HEB timeout: sin|ticket no encontrado|No se encontraron/i.test(raw);

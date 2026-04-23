@@ -118,6 +118,35 @@ function logMcd(etapa, obj) {
   }
 }
 
+/** @param {string} [etapa] — para logs si el cuerpo no es JSON */
+function parseMcdJsonBody(raw, etapa = 'respuesta') {
+  if (raw == null || raw === '') {
+    console.error(`[McDonalds] ${etapa}: cuerpo vacío`);
+    throw new Error(`McDonald's: respuesta vacía (${etapa})`);
+  }
+  const s = typeof raw === 'string' ? raw : String(raw);
+  const t = s.trim();
+  if (!t.startsWith('{') && !t.startsWith('[')) {
+    console.error(`[McDonalds] ${etapa}: no parece JSON:`, t.slice(0, 500));
+    throw new Error(`McDonald's: respuesta no JSON (${etapa})`);
+  }
+  try {
+    return JSON.parse(s);
+  } catch (e) {
+    console.error(`[McDonalds] ${etapa}: JSON inválido:`, e.message, t.slice(0, 400));
+    throw new Error(`McDonald's: JSON inválido (${etapa})`);
+  }
+}
+
+function esErrorRedInterrumpida(err) {
+  const code = String(err?.code || '');
+  const msg = String(err?.message || '');
+  const blob = `${code} ${msg}`;
+  if (/ECONNRESET|ECONNABORTED|ETIMEDOUT|ECANCELED|EPIPE|ENOTFOUND|EAI_AGAIN/i.test(blob)) return true;
+  if (/socket hang up|canceled|cancelled/i.test(msg)) return true;
+  return axios.isCancel?.(err) === true;
+}
+
 /** Respuestas object:error del PAC con detalles SAT (CFDI40xxx). */
 function extraerMensajesSatDesdeErrorPortal(obj) {
   const codes = [];
@@ -259,7 +288,7 @@ async function facturarMcDonalds({
       ...mcdHttp(),
       headers: headersForm(),
     });
-    const val = JSON.parse(resVal.data);
+    const val = parseMcdJsonBody(resVal.data, 'validar ticket');
     logMcd('validar ticket (status_ticket=3)', val);
     if (val.status === 5 || /facturado|previously/i.test(String(val.previously || ''))) {
       return { ok: false, error: 'ya_facturado', mensaje: val.msj || 'Ticket ya facturado.' };
@@ -310,7 +339,7 @@ async function facturarMcDonalds({
       ...mcdHttp(),
       headers: headersForm(),
     });
-    const d1 = JSON.parse(res1.data);
+    const d1 = parseMcdJsonBody(res1.data, 'emisión paso A');
     logMcd('emisión paso A (status_form=0)', d1);
 
     if (tieneFacturaXml(d1)) {
@@ -325,18 +354,97 @@ async function facturarMcDonalds({
           headers: headersForm(),
         });
 
-      let res2 = await postConfirm();
-      let d2 = JSON.parse(res2.data);
-      logMcd('emisión paso B (status_form=1)', d2);
+      let res2;
+      let d2;
+      try {
+        res2 = await postConfirm();
+        console.log(
+          '[McDonalds] emisión paso B HTTP',
+          res2.status,
+          'body:',
+          String(res2.data == null ? '' : res2.data).slice(0, 280)
+        );
+        d2 = parseMcdJsonBody(res2.data, 'emisión paso B');
+        logMcd('emisión paso B (status_form=1)', d2);
+      } catch (e) {
+        const st = e.response?.status;
+        const axBody = e.response?.data != null ? String(e.response.data).slice(0, 500) : '';
+        const prevBody = res2?.data != null ? String(res2.data).slice(0, 500) : '';
+        console.error(
+          '[McDonalds] fallo paso B (confirmar timbrado):',
+          e.message,
+          'http:',
+          st || 'n/a',
+          axBody ? `resp:${axBody.slice(0, 200)}` : prevBody ? `body:${prevBody.slice(0, 200)}` : ''
+        );
+        if (st === 407) {
+          return { ok: false, error: 'proxy_auth', mensaje: 'Proxy HTTP 407 — revisa PROXY_URL_ROTATING.' };
+        }
+        if (st === 403 || st === 401) {
+          return {
+            ok: false,
+            error: 'portal_forbidden',
+            mensaje: 'El portal rechazó la conexión (403/401). Prueba proxy en México o red local.',
+          };
+        }
+        if (st === 504 || st === 502 || st === 503) {
+          return {
+            ok: false,
+            error: 'mcd_timeout',
+            mensaje: `Tiempo agotado al confirmar (HTTP ${st}). Reintenta en unos minutos.`,
+          };
+        }
+        const em = String(e.message || '');
+        if (/JSON inválido|no parece JSON|respuesta vacía|respuesta no JSON/i.test(em)) {
+          return {
+            ok: false,
+            error: 'mcd_respuesta_portal',
+            mensaje:
+              'McDonald\'s respondió algo que no es JSON al confirmar (HTML, vacío o error intermedio). Suele ser proxy o portal inestable. Reintenta o prueba otra red.',
+            portalSnippet: (prevBody || em).slice(0, 400),
+            portalStatus: res2?.status,
+          };
+        }
+        if (e.response) {
+          return {
+            ok: false,
+            error: 'mcd_error',
+            mensaje: em,
+            portalSnippet: axBody || em,
+            portalStatus: st,
+          };
+        }
+        throw e;
+      }
 
       if (tieneFacturaXml(d2)) {
         return finalizeInvoice(d2, outputDir);
       }
 
       if (d2.status === 1) {
-        res2 = await postConfirm();
-        d2 = JSON.parse(res2.data);
-        logMcd('emisión paso B2 (status_form=1 reintento)', d2);
+        let resB2;
+        try {
+          resB2 = await postConfirm();
+          console.log(
+            '[McDonalds] emisión paso B2 HTTP',
+            resB2.status,
+            'body:',
+            String(resB2.data == null ? '' : resB2.data).slice(0, 280)
+          );
+          d2 = parseMcdJsonBody(resB2.data, 'emisión paso B2');
+          res2 = resB2;
+          logMcd('emisión paso B2 (status_form=1 reintento)', d2);
+        } catch (e) {
+          console.error('[McDonalds] fallo paso B2:', e.message, e.response?.status);
+          const prevBody = resB2?.data != null ? String(resB2.data).slice(0, 500) : '';
+          return {
+            ok: false,
+            error: 'mcd_respuesta_portal',
+            mensaje: String(e.message).slice(0, 400),
+            portalSnippet: prevBody.slice(0, 400),
+            portalStatus: resB2?.status ?? res2?.status,
+          };
+        }
         if (tieneFacturaXml(d2)) {
           return finalizeInvoice(d2, outputDir);
         }
@@ -360,6 +468,15 @@ async function facturarMcDonalds({
     };
   } catch (err) {
     const status = err.response?.status;
+    console.error(
+      '[McDonalds] excepción:',
+      err.message,
+      'http:',
+      status || 'n/a',
+      'code:',
+      err.code || 'n/a',
+      err.response?.data != null ? `body:${String(err.response.data).slice(0, 350)}` : ''
+    );
     if (status === 407) {
       return { ok: false, error: 'proxy_auth', mensaje: 'Proxy HTTP 407 — revisa PROXY_URL_ROTATING.' };
     }
@@ -368,6 +485,32 @@ async function facturarMcDonalds({
         ok: false,
         error: 'portal_forbidden',
         mensaje: 'El portal rechazó la conexión (403/401). Prueba proxy en México o red local.',
+      };
+    }
+    // 504/502/503: gateway del PAC, proxy MX o balanceador; el timbrado puede tardar >60s
+    const msgAxios = String(err.message || '');
+    if (status === 504 || status === 502 || status === 503) {
+      return {
+        ok: false,
+        error: 'mcd_timeout',
+        mensaje: `Tiempo de espera agotado en el portal o en la ruta de red (HTTP ${status}). McDonald's a veces tarda al timbrar. Reintenta en unos minutos.`,
+      };
+    }
+    if (/status code 502|status code 503|status code 504/i.test(msgAxios)) {
+      return {
+        ok: false,
+        error: 'mcd_timeout',
+        mensaje:
+          'Tiempo de espera (502/503/504) al contactar el portal o el proxy. Reintenta en unos minutos.',
+      };
+    }
+    if (esErrorRedInterrumpida(err)) {
+      return {
+        ok: false,
+        error: 'mcd_red',
+        mensaje:
+          'Se cortó la conexión con el portal (red, proxy o el contenedor se reinició durante el timbrado). ' +
+          'Es común si el hosting hace *Stopping Container* en un deploy. Reintenta cuando el servicio esté estable.',
       };
     }
     const msg = err.response?.data ? String(err.response.data).slice(0, 500) : err.message;
