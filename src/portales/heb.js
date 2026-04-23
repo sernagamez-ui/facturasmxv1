@@ -213,6 +213,125 @@ function escapeRegExp(s) {
 }
 
 /**
+ * Saca un array de filas de las respuestas get_* del portal (formas varían).
+ * @param {unknown} j
+ * @returns {Array<Record<string, unknown>>}
+ */
+function hebRowsFromCatalogJson(j) {
+  if (!j || typeof j !== 'object') return [];
+  if (Array.isArray(j)) return j;
+  const o = j;
+  for (const k of ['rows', 'data', 'list', 'regimenFiscal', 'usosCfdi', 'items', 'regimenFiscales']) {
+    const v = o[k];
+    if (Array.isArray(v)) return v;
+  }
+  if (o.result && typeof o.result === 'object') {
+    for (const k of ['rows', 'data', 'list']) {
+      if (Array.isArray(o.result[k])) return o.result[k];
+    }
+  }
+  if (o.data && typeof o.data === 'object' && o.data !== null) {
+    const d = o.data;
+    for (const k of ['rows', 'list', 'data']) {
+      if (Array.isArray(d[k])) return d[k];
+    }
+  }
+  return [];
+}
+
+/**
+ * @param {Record<string, unknown>} row
+ * @param {string} want
+ */
+function hebRowClaveIs(row, want) {
+  const w = String(want).trim();
+  const wu = w.toUpperCase();
+  for (const k of [
+    'c_RegimenFiscal',
+    'c_regimenFiscal',
+    'c_RegFiscal',
+    'c_Clave',
+    'c_ClaveRegFiscalC',
+    'c_UsoCfdi',
+    'c_UsoCFDI',
+    'UsoCfdI',
+    'UsoCfdi',
+    'c_Uso',
+    'Clave',
+    'CLAVE',
+    'clave',
+    'codigo',
+    'id',
+  ]) {
+    if (row[k] == null) continue;
+    const s = String(row[k]).trim();
+    if (s === w || s.toUpperCase() === wu) return true;
+  }
+  for (const [k, v] of Object.entries(row)) {
+    if (v == null) continue;
+    const s = String(v).trim();
+    if (s === w && /(fiscal|regimen|clave|uso|cfdi|cve|cod|id)/i.test(k)) return true;
+  }
+  return false;
+}
+
+/**
+ * @param {Record<string, unknown>} row
+ * @param {string} clave
+ */
+function hebRowLabelForForm(row, clave) {
+  const c = String(clave);
+  const desc =
+    String(
+      row.descripcion ??
+        row.Descripcion ??
+        row.nombre ??
+        row.nombreCfdi ??
+        row.descrip ??
+        row.label ??
+        ''
+    ).trim();
+  if (desc && (desc.toUpperCase().includes(c) || new RegExp(`\\b${escapeRegExp(c)}\\b`, 'i').test(desc)))
+    return desc;
+  if (desc) return `${c} - ${desc}`.replace(/\s+-\s*-\s+/, ' - ').replace(`${c} - ${c} - `, `${c} - `);
+  return c;
+}
+
+/**
+ * @param {Record<string, unknown>} cap
+ * @param {'regimen' | 'uso_cfdi'} fileTag
+ * @param {string} code
+ * @returns {string | null} texto para tipear y filtrar (descripción o "clave - descripción")
+ */
+function hebCatalogTextHint(cap, fileTag, code) {
+  const c = String(code).trim();
+  if (!c) return null;
+  const j = fileTag === 'regimen' ? cap.regimenFiscalJson : cap.usoCfdiJson;
+  if (!j) {
+    if (HEB_DEBUG_API) {
+      console.log(
+        `[HEB] catálogo ${fileTag}: no interceptado (espera GET ${
+          fileTag === 'regimen' ? 'regimen_fiscal' : 'uso_cfdi_sel'
+        })`
+      );
+    }
+    return null;
+  }
+  const rows = hebRowsFromCatalogJson(j);
+  for (const row of rows) {
+    if (!row || typeof row !== 'object') continue;
+    if (!hebRowClaveIs(row, c)) continue;
+    const t = hebRowLabelForForm(/** @type {Record<string, unknown>} */ (row), c);
+    if (t) {
+      if (HEB_DEBUG_API) console.log('[HEB] catálogo fila', fileTag, String(t).slice(0, 100));
+    }
+    return t;
+  }
+  if (HEB_DEBUG_API) console.log('[HEB] catálogo', fileTag, 'no halló clave', c, 'n=', rows.length);
+  return null;
+}
+
+/**
  * Varios PNG para Telegram/diagnóstico: página, campo y panel del autocomplete.
  * @param {import('playwright').Page} page
  * @param {import('playwright').Locator} inputLoc
@@ -366,17 +485,82 @@ async function hebClickOptionByCodeInPanel(page, inputLoc, c, fileTag, opts) {
 }
 
 /**
- * Régimen / USO CFDI: mat-autocomplete. Si al escribir "601" el filtro no encuentra nada
- * (sólo descripción visible), abrir el panel vacío (flechas) y buscar 601  ( 601  )  en el texto.
+ * Click en la opción que contenga el código como palabra (incluye overlay y nodos aún no “visibles” para Playwright).
+ * @param {import('playwright').Page} page
+ * @param {string} c
+ */
+async function hebClickMatOptionInDomByCode(page, c) {
+  return page.evaluate((code) => {
+    const esc = String(code).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const re = new RegExp(`\\b${esc}\\b`, 'i');
+    const all = document.querySelectorAll('mat-option, mat-mdc-option, [role=option]');
+    for (const el of all) {
+      const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
+      if (!t || !re.test(t)) continue;
+      el.scrollIntoView({ block: 'center', inline: 'nearest' });
+      el.click();
+      return true;
+    }
+    return false;
+  }, c);
+}
+
+/**
+ * Régimen / USO CFDI: mat-autocomplete. Usa JSON de regimen_fiscal / uso_cfdi_sel si el panel no lista mat-option.
  * @param {import('playwright').Page} page
  * @param {import('playwright').Locator} inputLoc
  * @param {string} code
  * @param {string} fileTag nombre corto (regimen | uso_cfdi)
+ * @param {Record<string, unknown>} cap capturado (regimenFiscalJson, usoCfdiJson)
  */
-async function hebSelectMatAutocomplete(page, inputLoc, code, fileTag) {
+async function hebSelectMatAutocomplete(page, inputLoc, code, fileTag, cap = {}) {
   const c = String(code).trim();
   if (!c) throw new Error(`HEB ${fileTag} vacío`);
   const T = 25_000;
+
+  const textHint = hebCatalogTextHint(/** @type {Record<string, unknown>} */ (cap), fileTag, c);
+  if (textHint) {
+    const rawChunks = [
+      textHint,
+      textHint.slice(0, 80),
+      textHint.slice(0, 50),
+      textHint.split(/\s*-\s*/)[0]?.trim() || '',
+      c,
+    ];
+    const chunks = [];
+    const seen = new Set();
+    for (const x of rawChunks) {
+      if (x && !seen.has(x)) {
+        seen.add(x);
+        chunks.push(x);
+      }
+    }
+    for (const chunk of chunks) {
+      await inputLoc.click();
+      await inputLoc.fill('');
+      await page.waitForTimeout(150);
+      await inputLoc.fill(chunk);
+      await page.waitForTimeout(700);
+      await inputLoc.press('ArrowDown').catch(() => {});
+      if (await hebClickMatOptionInDomByCode(page, c)) {
+        console.log(`[HEB] ${fileTag} OK (catálogo API + click DOM), filtro:`, chunk.slice(0, 60));
+        await page.waitForTimeout(200);
+        return;
+      }
+      const re = new RegExp(`^\\s*${escapeRegExp(c)}\\b`);
+      const byRe = hebAutocompleteOptions(page).filter({ hasText: re });
+      try {
+        await byRe.first().waitFor({ state: 'visible', timeout: 6_000 });
+        await byRe.first().click();
+        await page.waitForTimeout(200);
+        return;
+      } catch {
+        // sigue
+      }
+      if (await hebClickOptionByCodeInPanel(page, inputLoc, c, fileTag, { openUnfiltered: false })) return;
+    }
+    console.log(`[HEB] ${fileTag}: catálogo API no resolvió con relleno, flujo estándar…`);
+  }
 
   await inputLoc.click();
   await inputLoc.fill('');
@@ -419,9 +603,29 @@ async function hebSelectMatAutocomplete(page, inputLoc, code, fileTag) {
     await page.waitForTimeout(400);
   }
 
+  if (await hebClickMatOptionInDomByCode(page, c)) {
+    console.log(`[HEB] ${fileTag} OK (último intento click DOM con código ${c})`);
+    await page.waitForTimeout(200);
+    return;
+  }
+
   await hebFiscalDebugScreenshots(page, inputLoc, fileTag);
+  let apiHint = '';
+  try {
+    if (fileTag === 'regimen' && cap.regimenFiscalJson) {
+      const rows = hebRowsFromCatalogJson(cap.regimenFiscalJson);
+      apiHint = ` nFilasJson=${rows.length}`;
+    } else if (fileTag === 'uso_cfdi' && cap.usoCfdiJson) {
+      const rows = hebRowsFromCatalogJson(cap.usoCfdiJson);
+      apiHint = ` nFilasJson=${rows.length}`;
+    } else {
+      apiHint = ' (sin JSON de catálogo en memoria)';
+    }
+  } catch {
+    // noop
+  }
   throw new Error(
-    `HEB no pudo elegir ${fileTag}  ${c}  (mat-autocomplete). ` +
+    `HEB no pudo elegir ${fileTag}  ${c}  (mat-autocomplete).${apiHint} ` +
       `Revisa: heb_fiscal_${fileTag}_full.png, _field.png, _panel.png en ${HEB_SCREENSHOT_DIR}`
   );
 }
@@ -461,6 +665,20 @@ async function _generarFacturaHEB(ticketData, userData) {
         if (!url.includes('/cli/api')) return;
         if (url.includes('consulta_facturas_uuid')) {
           captured.uuidData = await res.json();
+        }
+        if (url.includes('regimen_fiscal') && res.request().method() === 'GET' && res.status() === 200) {
+          const j = await res.json();
+          if (j) {
+            captured.regimenFiscalJson = j;
+            if (HEB_DEBUG_API) {
+              const rows = hebRowsFromCatalogJson(j);
+              console.log(`[HEB] intercept regimen_fiscal n=${rows.length} keysTop=${Object.keys(j).slice(0, 6).join(',')}`);
+            }
+          }
+        }
+        if (url.includes('uso_cfdi_sel') && res.request().method() === 'GET' && res.status() === 200) {
+          const j = await res.json();
+          if (j) captured.usoCfdiJson = j;
         }
       } catch {}
     });
@@ -579,14 +797,49 @@ async function _generarFacturaHEB(ticketData, userData) {
     await page.waitForTimeout(800);
     console.log('[HEB] CP:', cp);
 
-    // ── Régimen / USO CFDI — mat-autocomplete (8s en Railway suele quedarse corto; ver hebSelectMatAutocomplete)
-    await hebSelectMatAutocomplete(page, fi.nth(3), String(regimenFiscal), 'regimen');
+    // Si el GET de catálogo ocurrió antes de rellenar, el listener puede no haberlo guardado: repetir con fetch (misma cookie).
+    if (!captured.regimenFiscalJson) {
+      try {
+        const j = await page.evaluate(async () => {
+          const r = await fetch(
+            'https://facturacion.heb.com.mx/cli/api/consulta/regimen_fiscal',
+            { credentials: 'include' }
+          );
+          if (!r.ok) return null;
+          return r.json();
+        });
+        if (j) {
+          captured.regimenFiscalJson = j;
+          console.log('[HEB] regimen_fiscal reobtenido vía fetch en página');
+        }
+      } catch {
+        // noop
+      }
+    }
+    if (!captured.usoCfdiJson) {
+      try {
+        const j = await page.evaluate(async () => {
+          const r = await fetch('https://facturacion.heb.com.mx/cli/api/consulta/uso_cfdi_sel', { credentials: 'include' });
+          if (!r.ok) return null;
+          return r.json();
+        });
+        if (j) {
+          captured.usoCfdiJson = j;
+          console.log('[HEB] uso_cfdi_sel reobtenido vía fetch en página');
+        }
+      } catch {
+        // noop
+      }
+    }
+
+    // ── Régimen / USO CFDI — mat-autocomplete (catálogo API + DOM si no hay mat-option)
+    await hebSelectMatAutocomplete(page, fi.nth(3), String(regimenFiscal), 'regimen', captured);
     console.log('[HEB] Régimen:', regimenFiscal);
 
     await fi.nth(4).fill(email);
     console.log('[HEB] Email:', email);
 
-    await hebSelectMatAutocomplete(page, fi.nth(5), String(usoCfdi), 'uso_cfdi');
+    await hebSelectMatAutocomplete(page, fi.nth(5), String(usoCfdi), 'uso_cfdi', captured);
     console.log('[HEB] Uso CFDI:', usoCfdi);
 
     await page.waitForTimeout(300);
