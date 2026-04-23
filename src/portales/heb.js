@@ -403,16 +403,102 @@ function hebAutocompleteOptions(page) {
 }
 
 /**
+ * Parte descriptiva del renglón del catálogo (después de "601 -" o "G03 -") para filtrar sin depender
+ * de que el mat-option muestre el número al inicio.
+ * @param {string} textHint
+ */
+function hebLabelWithoutClave(textHint) {
+  const s = String(textHint || '').trim();
+  if (!s) return '';
+  if (s.includes(' - ')) {
+    return s
+      .split(/\s*-\s*/)
+      .slice(1)
+      .join(' - ')
+      .trim();
+  }
+  return s;
+}
+
+/**
+ * Rellena el input de mat-autocomplete de forma que Angular reaccione (fill a veces no abre el panel).
+ * @param {import('playwright').Page} page
+ * @param {import('playwright').Locator} inputLoc
+ * @param {string} text
+ */
+async function hebMatInputType(page, inputLoc, text) {
+  const t = String(text);
+  await inputLoc.click();
+  await inputLoc.fill('');
+  await page.waitForTimeout(120);
+  if (t.length < 200) {
+    await inputLoc.pressSequentially(t, { delay: 22 });
+  } else {
+    await inputLoc.fill(t);
+  }
+  await page.waitForTimeout(520);
+}
+
+/**
+ * Clic en la opción cuyo texto contiene la descripción (o el código) buscada.
+ * @param {import('playwright').Page} page
+ * @param {string} code
+ * @param {string} textHint
+ */
+async function hebClickMatOptionFuzzyInDom(page, code, textHint) {
+  const noClave = hebLabelWithoutClave(textHint);
+  return page.evaluate(
+    ([c, desc]) => {
+      const n = (s) => s.replace(/\s+/g, ' ').trim().toLowerCase();
+      const all = document.querySelectorAll('mat-option, mat-mdc-option, [role=option]');
+      const esc = String(c).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const reC = new RegExp(`\\b${esc}\\b`, 'i');
+      const d = n(desc);
+      const words = d.split(/\s+/).filter((w) => w.length > 2);
+      const short = words.slice(0, 5).join(' ');
+
+      for (const el of all) {
+        const t = n((el.textContent || ''));
+        if (!t) continue;
+        if (reC.test(t)) {
+          el.scrollIntoView({ block: 'center', inline: 'nearest' });
+          el.click();
+          return true;
+        }
+      }
+      if (d.length < 5) return false;
+      for (const el of all) {
+        const t = n((el.textContent || ''));
+        if (!t) continue;
+        if (d.length >= 10 && t.includes(d.slice(0, 36))) {
+          el.scrollIntoView({ block: 'center', inline: 'nearest' });
+          el.click();
+          return true;
+        }
+        if (short.length >= 10 && t.includes(short)) {
+          el.scrollIntoView({ block: 'center', inline: 'nearest' });
+          el.click();
+          return true;
+        }
+      }
+      return false;
+    },
+    [String(code), noClave || String(textHint)]
+  );
+}
+
+/**
  * Escribe código en el input y, si al filtrar el panel se vacía, abre de nuevo (vacío + flechas) y busca por texto.
  * @param {import('playwright').Page} page
  * @param {import('playwright').Locator} inputLoc
  * @param {string} c
  * @param {string} fileTag
- * @param {{ openUnfiltered: boolean }} opts
+ * @param {{ openUnfiltered: boolean, fuzzyHint?: string }} opts
  */
 async function hebClickOptionByCodeInPanel(page, inputLoc, c, fileTag, opts) {
   const reWord = new RegExp(`\\b${escapeRegExp(c)}\\b`, 'i');
   const reStart = new RegExp(`^\\s*${escapeRegExp(c)}\\b`, 'i');
+  const fuzzy = opts.fuzzyHint ? hebLabelWithoutClave(opts.fuzzyHint) : '';
   const collectVisibleTexts = async () => {
     const loc = hebAutocompleteOptions(page);
     const n = await loc.count();
@@ -441,6 +527,33 @@ async function hebClickOptionByCodeInPanel(page, inputLoc, c, fileTag, opts) {
       ) {
         await el.click();
         console.log(`[HEB] ${fileTag} OK:`, txt.slice(0, 120));
+        await page.waitForTimeout(200);
+        return true;
+      }
+    }
+    return false;
+  };
+
+  const tryFuzzy = async (rows) => {
+    if (!fuzzy || fuzzy.length < 6) return false;
+    const nF = fuzzy.replace(/\s+/g, ' ').toLowerCase();
+    const head = nF.slice(0, 44);
+    const five = nF
+      .split(/\s+/)
+      .filter((w) => w.length > 2)
+      .slice(0, 5)
+      .join(' ');
+    for (const { el, txt } of rows) {
+      const t = txt.replace(/\s+/g, ' ').toLowerCase();
+      if (head.length >= 10 && t.includes(head)) {
+        await el.click();
+        console.log(`[HEB] ${fileTag} OK (fuzzy desc):`, txt.slice(0, 120));
+        await page.waitForTimeout(200);
+        return true;
+      }
+      if (five.length >= 10 && t.includes(five)) {
+        await el.click();
+        console.log(`[HEB] ${fileTag} OK (fuzzy 5 palabras):`, txt.slice(0, 120));
         await page.waitForTimeout(200);
         return true;
       }
@@ -481,6 +594,7 @@ async function hebClickOptionByCodeInPanel(page, inputLoc, c, fileTag, opts) {
   }
 
   if (await tryClick(rows)) return true;
+  if (await tryFuzzy(rows)) return true;
   return false;
 }
 
@@ -520,11 +634,19 @@ async function hebSelectMatAutocomplete(page, inputLoc, code, fileTag, cap = {})
 
   const textHint = hebCatalogTextHint(/** @type {Record<string, unknown>} */ (cap), fileTag, c);
   if (textHint) {
+    const descOnly = hebLabelWithoutClave(textHint);
+    const threeWords = descOnly
+      .split(/\s+/)
+      .filter((w) => w.length > 2)
+      .slice(0, 3)
+      .join(' ');
     const rawChunks = [
       textHint,
+      descOnly,
       textHint.slice(0, 80),
       textHint.slice(0, 50),
       textHint.split(/\s*-\s*/)[0]?.trim() || '',
+      threeWords,
       c,
     ];
     const chunks = [];
@@ -536,14 +658,20 @@ async function hebSelectMatAutocomplete(page, inputLoc, code, fileTag, cap = {})
       }
     }
     for (const chunk of chunks) {
-      await inputLoc.click();
-      await inputLoc.fill('');
-      await page.waitForTimeout(150);
-      await inputLoc.fill(chunk);
-      await page.waitForTimeout(700);
+      await hebMatInputType(page, inputLoc, chunk);
       await inputLoc.press('ArrowDown').catch(() => {});
+      if (await hebClickMatOptionFuzzyInDom(page, c, textHint)) {
+        console.log(`[HEB] ${fileTag} OK (catálogo API + fuzzy DOM), filtro:`, chunk.slice(0, 60));
+        await page.waitForTimeout(200);
+        return;
+      }
       if (await hebClickMatOptionInDomByCode(page, c)) {
         console.log(`[HEB] ${fileTag} OK (catálogo API + click DOM), filtro:`, chunk.slice(0, 60));
+        await page.waitForTimeout(200);
+        return;
+      }
+      await inputLoc.press('Enter').catch(() => {});
+      if (await hebClickMatOptionFuzzyInDom(page, c, textHint)) {
         await page.waitForTimeout(200);
         return;
       }
@@ -557,16 +685,13 @@ async function hebSelectMatAutocomplete(page, inputLoc, code, fileTag, cap = {})
       } catch {
         // sigue
       }
-      if (await hebClickOptionByCodeInPanel(page, inputLoc, c, fileTag, { openUnfiltered: false })) return;
+      if (await hebClickOptionByCodeInPanel(page, inputLoc, c, fileTag, { openUnfiltered: false, fuzzyHint: textHint }))
+        return;
     }
     console.log(`[HEB] ${fileTag}: catálogo API no resolvió con relleno, flujo estándar…`);
   }
 
-  await inputLoc.click();
-  await inputLoc.fill('');
-  await page.waitForTimeout(200);
-  await inputLoc.fill(c);
-  await page.waitForTimeout(600);
+  await hebMatInputType(page, inputLoc, c);
   await inputLoc.press('ArrowDown').catch(() => {});
 
   const re = new RegExp(`^\\s*${escapeRegExp(c)}\\b`);
@@ -580,27 +705,33 @@ async function hebSelectMatAutocomplete(page, inputLoc, code, fileTag, cap = {})
     console.log(`[HEB] ${fileTag}: sin fila "empieza con código", reintentos…`);
   }
 
-  if (await hebClickOptionByCodeInPanel(page, inputLoc, c, fileTag, { openUnfiltered: false })) {
+  if (await hebClickOptionByCodeInPanel(page, inputLoc, c, fileTag, { openUnfiltered: false, fuzzyHint: textHint })) {
     return;
   }
 
   console.log(`[HEB] ${fileTag}: abriendo panel sin filtrar (código a veces no está en el string filtrable)…`);
-  if (await hebClickOptionByCodeInPanel(page, inputLoc, c, fileTag, { openUnfiltered: true })) {
+  if (await hebClickOptionByCodeInPanel(page, inputLoc, c, fileTag, { openUnfiltered: true, fuzzyHint: textHint })) {
     return;
   }
 
-  await inputLoc.fill(c);
+  await hebMatInputType(page, inputLoc, c);
   await page.waitForTimeout(500);
-  if (await hebClickOptionByCodeInPanel(page, inputLoc, c, fileTag, { openUnfiltered: false })) {
+  if (await hebClickOptionByCodeInPanel(page, inputLoc, c, fileTag, { openUnfiltered: false, fuzzyHint: textHint })) {
     return;
   }
 
   const t0 = Date.now();
   while (Date.now() - t0 < 4_000) {
-    if (await hebClickOptionByCodeInPanel(page, inputLoc, c, fileTag, { openUnfiltered: true })) {
+    if (await hebClickOptionByCodeInPanel(page, inputLoc, c, fileTag, { openUnfiltered: true, fuzzyHint: textHint })) {
       return;
     }
     await page.waitForTimeout(400);
+  }
+
+  if (textHint && (await hebClickMatOptionFuzzyInDom(page, c, textHint))) {
+    console.log(`[HEB] ${fileTag} OK (fuzzy DOM tras reintentos)`);
+    await page.waitForTimeout(200);
+    return;
   }
 
   if (await hebClickMatOptionInDomByCode(page, c)) {

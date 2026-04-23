@@ -482,18 +482,18 @@ async function procesarFactura(ticketData, userData, phone, outputDirOverride) {
           '⏱️ *Tiempo agotado en la red* (HTTP 502/503/504). Suele ser el portal, el proxy o el límite de tiempo del hosting. No es un problema de la foto. Reintenta en 2–5 minutos.',
       };
     }
-    const hebTextoLargo =
-      comercio === 'heb' &&
-      /HEB solo correo|pantalla muestra|HEB timeout: sin|ticket no encontrado|No se encontraron/i.test(raw);
     const techHebPlano =
       comercio === 'heb' &&
       /waitForResponse|Timeout \d+ms exceeded|playwright|HEB sin|portal HEB/i.test(raw) &&
-      !/HEB solo correo|pantalla muestra|HEB timeout: sin|ticket no encontrado|No se encontraron/i.test(raw);
-    const userMessage = hebTextoLargo
-      ? `⚠️ *HEB*\n\n${raw.slice(0, 1800)}`
-      : techHebPlano
-        ? `⚠️ *Problema con el portal HEB al generar la factura o la respuesta tardó demasiado.*\n\n_${raw.slice(0, 400)}_\n\n` +
-          `Reintenta en unos minutos. Si sigue igual, factura en facturacion.heb.com.mx o revisa el deploy.`
+      !/HEB solo correo|pantalla muestra|HEB timeout: sin|ticket no encontrado|No se encontraron|HEB no pudo elegir|heb_fiscal_|heb fiscal|mat-autocomplete|faltan datos|HEB timbrado|HEB sin XML|nfilasjson/i.test(
+        raw
+      );
+    // Cualquier error en el flujo HEB (portal/autocomplete/timbrado) no debe parecer "foto ilegible".
+    const userMessage = techHebPlano
+      ? `⚠️ *Problema con el portal HEB al generar la factura o la respuesta tardó demasiado.*\n\n_${raw.slice(0, 400)}_\n\n` +
+        `Reintenta en unos minutos. Si sigue igual, factura en facturacion.heb.com.mx o revisa el deploy.`
+      : comercio === 'heb'
+        ? `⚠️ *HEB*\n\n${raw.slice(0, 1800)}`
         : `⚠️ *No pude leer todos los datos del ticket.*\n\n${raw}\n\n¿Puedes tomar otra foto más clara y cercana?`;
     return {
       ok: false, comercio,
