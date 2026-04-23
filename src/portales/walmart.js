@@ -126,7 +126,16 @@ async function cerrarPopupsWalmart(page, tag) {
               '[role="dialog"], .ui-dialog, [class*="modal"], [id*="Mensaje"], [id*="Popup"], [id*="Aviso"]'
             )
         ).catch(() => false);
-        if (inDialog) {
+        const inBlock = inDialog
+          || (await b
+            .evaluate(
+              (el) =>
+                !!el.closest(
+                  '[class*="overlay"], [id*="Mensaje"], [id*="Popup"], [id*="Aviso"], [class*="modal"]'
+                )
+            )
+            .catch(() => false));
+        if (inBlock) {
           await b.click({ timeout: 4_000 }).catch(() => {});
           hubo = true;
           cerrados++;
@@ -147,7 +156,7 @@ async function cerrarPopupsWalmart(page, tag) {
         const inOvl = await inp
           .evaluate((el) =>
             !!el.closest(
-              '[role="dialog"], .ui-dialog, [class*="modal"], [id*="Mensaje"], [id*="Popup"]'
+              '[role="dialog"], .ui-dialog, [class*="modal"], [id*="Mensaje"], [id*="Popup"], [class*="overlay"]'
             )
           )
           .catch(() => false);
@@ -165,6 +174,95 @@ async function cerrarPopupsWalmart(page, tag) {
   }
 
   if (cerrados > 0) console.log(`${tag} modales/avisos cerrados (${cerrados} clic[s])`);
+  await clicCapasZIndexWalmart(page, tag);
+}
+
+/**
+ * Avisos Walmex a menudo son divs con position:fixed/absolute y z-index, sin [role=dialog]
+ * (p. ej. wizards, barras, CFDI). Clic en Aceptar/Continuar/Siguiente solo si está en capa
+ * superpuesta; no pisa el Aceptar principal del flujo de ticket (frmDatos) si está al fondo.
+ *
+ * @param {import('playwright').Page} page
+ * @param {string} tag
+ */
+async function clicCapasZIndexWalmart(page, tag) {
+  for (let a = 0; a < 4; a++) {
+    const label = await page.evaluate(() => {
+      const re =
+        /^(Aceptar|Acepto|Entendido|Entiendo|Continuar|Siguiente|Cerrar|OK|De acuerdo|Confirmar|Ir\s+al\s+inicio)$/i;
+      const nodes = document.querySelectorAll('button, input[type="button"], input[type="submit"], a[href]');
+      function maxZBelow(el) {
+        let m = 0;
+        for (let x = el; x && x !== document.body; x = x.parentElement) {
+          const st = getComputedStyle(x);
+          const z = parseInt(st.zIndex, 10) || 0;
+          if (z > m) m = z;
+        }
+        return m;
+      }
+      function inOverlayish(el) {
+        if (el.closest('[role="dialog"]')) return true;
+        for (let p = el; p && p !== document.body; p = p.parentElement) {
+          const id = (p.id || '') + (p.className && p.className.toString ? p.className : '');
+          if (/Mensaje|Popup|Aviso|ui-dialog|modal|overlay|mask|bpopup|jconfirm|wizzard|wizard|banner/i.test(id))
+            return true;
+          const s = getComputedStyle(p);
+          const z = parseInt(s.zIndex, 10) || 0;
+          if (s.position === 'fixed' && z > 0 && p !== el) {
+            const br = p.getBoundingClientRect();
+            if (br.width > 180 && br.height > 50) return true;
+          }
+        }
+        if (maxZBelow(el) >= 50) return true;
+        return false;
+      }
+      for (const el of Array.from(nodes)) {
+        if (!el || !(el).offsetParent) continue;
+        const t = ((el).textContent || (el).value || (el).innerText || '')
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (!t || !re.test(t)) continue;
+        const id = (el).id || '';
+        if (id === 'ctl00_ContentPlaceHolder1_btnAceptar' || id.includes('ContentPlaceHolder1_btnAceptar')) {
+          if (!inOverlayish(el)) continue;
+        }
+        if (t.match(/^(Continuar|Siguiente)$/i)) {
+          if (!inOverlayish(el)) {
+            const r = el.getBoundingClientRect();
+            if (!(r.width > 100 && r.height > 20 && r.top < window.innerHeight * 0.35 && r.top >= 0)) {
+              continue;
+            }
+            /* CTA en franja superior (común en avisos a pantalla completa) */
+          }
+        } else if (!inOverlayish(el)) {
+          continue;
+        }
+        try {
+          el.click();
+        } catch {
+          return null;
+        }
+        return t;
+      }
+      return null;
+    });
+    if (!label) break;
+    console.log(`${tag} capa z-index/overlay: clic "${label}"`);
+    await page.waitForTimeout(600);
+  }
+}
+
+/**
+ * Repite cierre: muchos modales se encadenan (CFDI → continuar → otro aviso).
+ * @param {import('playwright').Page} page
+ * @param {string} tag
+ * @param {number} rondas
+ */
+async function despejarAvisosWalmart(page, tag, rondas = 5) {
+  for (let i = 0; i < rondas; i++) {
+    await cerrarPopupsWalmart(page, tag);
+    await page.waitForTimeout(250);
+  }
 }
 
 /**
@@ -187,7 +285,8 @@ async function esperarReportAdminTrasFiscal(page, maxMs, tag) {
   let tick = 0;
 
   while (Date.now() - t0 < maxMs) {
-    if (tick++ % 6 === 0) await cerrarPopupsWalmart(page, tag);
+    tick += 1;
+    if (tick % 2 === 0) await despejarAvisosWalmart(page, tag, 2);
     const url = page.url();
     if (url.includes('frmReportAdmin')) return { kind: 'admin' };
 
@@ -223,6 +322,7 @@ async function esperarReportAdminTrasFiscal(page, maxMs, tag) {
           }
         }
       }
+      await despejarAvisosWalmart(page, tag, 1);
       await btnC.click();
       clickedContinuar = true;
       console.log(`${tag} click Continuar (forma de pago)`);
@@ -345,11 +445,10 @@ async function facturarWalmart({ tc, tr, userData }) {
     console.log(`${tag} Cargando ${BASE}`);
     await page.goto(BASE, { waitUntil: 'domcontentloaded', timeout: T });
     await page.waitForTimeout(1000);
-    await cerrarPopupsWalmart(page, tag);
-    await cerrarPopupsWalmart(page, tag);
+    await despejarAvisosWalmart(page, tag, 6);
     await page.locator('#ctl00_ContentPlaceHolder1_txtTC').waitFor({ state: 'visible', timeout: T });
     await page.waitForTimeout(400);
-    await cerrarPopupsWalmart(page, tag);
+    await despejarAvisosWalmart(page, tag, 2);
 
     await page.locator('#ctl00_ContentPlaceHolder1_txtMemRFC').fill(rfc);
     await page.locator('#ctl00_ContentPlaceHolder1_txtCP').fill(cp);
@@ -501,6 +600,11 @@ async function facturarWalmart({ tc, tr, userData }) {
     return { ok: true, envioPorCorreo: true };
   } catch (e) {
     const msg = String(e && e.message ? e.message : e);
+    try {
+      if (page) console.error(`${tag} error url=${page.url()} → ${msg.slice(0, 500)}`);
+    } catch {
+      /* */
+    }
     try {
       fs.mkdirSync(SHOT, { recursive: true });
       if (page) await page.screenshot({ path: path.join(SHOT, 'walmart_error.png'), fullPage: true });
