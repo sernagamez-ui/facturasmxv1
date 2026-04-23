@@ -200,6 +200,7 @@ async function cerrarPopupsWalmart(page, tag) {
  * Avisos Walmex a menudo son divs con position:fixed/absolute y z-index, sin [role=dialog]
  * (p. ej. wizards, barras, CFDI). Clic en Aceptar/Continuar/Siguiente solo si está en capa
  * superpuesta; no pisa el Aceptar principal del flujo de ticket (frmDatos) si está al fondo.
+ * Nunca "Ir al inicio" aquí: envía a Default.aspx y desaparece #txtTC.
  *
  * @param {import('playwright').Page} page
  * @param {string} tag
@@ -208,7 +209,7 @@ async function clicCapasZIndexWalmart(page, tag) {
   for (let a = 0; a < 4; a++) {
     const label = await page.evaluate(() => {
       const re =
-        /^(Aceptar|Acepto|Entendido|Entiendo|Continuar|Siguiente|Cerrar|OK|De acuerdo|Confirmar|Ir\s+al\s+inicio)$/i;
+        /^(Aceptar|Acepto|Entendido|Entiendo|Continuar|Siguiente|Cerrar|OK|De acuerdo|Confirmar)$/i;
       const nodes = document.querySelectorAll('button, input[type="button"], input[type="submit"], a[href]');
       function maxZBelow(el) {
         let m = 0;
@@ -281,6 +282,37 @@ async function despejarAvisosWalmart(page, tag, rondas = 5) {
   for (let i = 0; i < rondas; i++) {
     await cerrarPopupsWalmart(page, tag);
     await page.waitForTimeout(250);
+  }
+}
+
+/**
+ * Tras modales, en ocasiones se termina en Default.aspx u otra URL sin #txtTC.
+ * Vuelve a abrir frmDatos (pocas rondas de cierre) hasta 3 veces.
+ * @param {import('playwright').Page} page
+ * @param {string} tag
+ * @param {number} T
+ */
+async function asegurarPantallaFrmDatos(page, tag, T) {
+  for (let i = 0; i < 3; i++) {
+    const u = (page.url() || '').toLowerCase();
+    const txtTc = page.locator('#ctl00_ContentPlaceHolder1_txtTC');
+    let visible = await txtTc.isVisible().catch(() => false);
+    if (u.includes('frmdatos') && !visible) {
+      await page.waitForTimeout(1200);
+      visible = await txtTc.isVisible().catch(() => false);
+    }
+    if (visible && u.includes('frmdatos')) {
+      if (i > 0) console.log(`${tag} formulario de ticket listo (reintento ${i + 1})`);
+      return;
+    }
+    if (i >= 2) break;
+    console.log(
+      `${tag} ajuste de pantalla: ${(page.url() || '—').slice(0, 100)}` +
+        (u.includes('frmdatos') ? ' (aún sin #txtTC visible)' : ' (sin frmDatos)')
+    );
+    await page.goto(BASE, { waitUntil: 'domcontentloaded', timeout: T });
+    await page.waitForTimeout(800);
+    await despejarAvisosWalmart(page, tag, 2);
   }
 }
 
@@ -484,6 +516,7 @@ async function facturarWalmart({ tc, tr, userData }) {
     await page.goto(BASE, { waitUntil: 'domcontentloaded', timeout: T });
     await page.waitForTimeout(1000);
     await despejarAvisosWalmart(page, tag, 6);
+    await asegurarPantallaFrmDatos(page, tag, T);
     await page.locator('#ctl00_ContentPlaceHolder1_txtTC').waitFor({ state: 'visible', timeout: T });
     await page.waitForTimeout(400);
     await despejarAvisosWalmart(page, tag, 2);
