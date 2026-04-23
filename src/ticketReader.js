@@ -31,6 +31,7 @@ const COMERCIO_CATEGORIA_FIJA = {
   '7eleven': 'tienda_conveniencia',
   sieveEleven: 'tienda_conveniencia',
   officedepot: 'papeleria_oficina',
+  homedepot: 'ferreteria_hogar',
   mcdonalds: 'restaurante',
   alsea:     'restaurante',
   carlsjr:   'restaurante',
@@ -178,6 +179,7 @@ async function leerTicket(imageBuffer, mimeType = 'image/jpeg') {
   const prompt   = elegirPrompt(comercio);
 
   // Alsea y 7-Eleven: dígitos deben ser exactos → Sonnet (más preciso)
+  // Home Depot: 23 dígitos bajo código de barras — mismo criterio
   // Otros: Haiku es suficiente (tienen QR o campos más tolerantes)
   const modelToUse =
     ALSEA_BRANDS.has(comercio) ||
@@ -186,7 +188,8 @@ async function leerTicket(imageBuffer, mimeType = 'image/jpeg') {
     comercio === 'oxxo' ||
     comercio === 'mcdonalds' ||
     comercio === 'petro7' ||
-    comercio === 'officedepot'
+    comercio === 'officedepot' ||
+    comercio === 'homedepot'
       ? MODEL_SONNET
       : MODEL;
 
@@ -667,6 +670,7 @@ ihop
 bww
 mcdonalds
 officedepot
+homedepot
 general
 
 REGLAS:
@@ -692,6 +696,7 @@ REGLAS:
 - Si ves "BUFFALO WILD WINGS", "BWW" (restaurante), alitas -> responde: bww
 - Si ves "MCDONALDS", "McDonald's", "MCDONALD'S", "RESTAURANTES ADMX", facturacionmcdonalds.com.mx -> responde: mcdonalds
 - Si ves "OFFICE DEPOT", "OFFICEMAX", "Office Depot", "OfficeMax", "ODMX", facturacion.officedepot.com.mx -> responde: officedepot
+- Si ves "HOME DEPOT", "THE HOME DEPOT", "HDM001017AS1", "homedepot.com.mx" o el logo naranja cuadrado -> responde: homedepot
 - Cualquier otro comercio -> responde: general`,
         },
       ],
@@ -705,6 +710,7 @@ REGLAS:
     ...ORIGON_CDC_BRANDS,
     'mcdonalds',
     'officedepot',
+    'homedepot',
     'general',
   ];
   return valid.includes(val) ? val : 'general';
@@ -722,6 +728,7 @@ function elegirPrompt(comercio) {
     case '7eleven': return prompt7Eleven();
     case 'mcdonalds': return promptMcDonalds();
     case 'officedepot': return promptOfficeDepot();
+    case 'homedepot':   return promptHomeDepot();
     default:        return promptGeneral();
   }
 }
@@ -1073,6 +1080,61 @@ SALIDA OBLIGATORIA:
 - "categoria" es "papeleria_oficina" (útiles, cómputo, mobiliario de oficina, excepto obras; si dudas, papeleria_oficina).
 
 Responde SOLO con el JSON, sin texto adicional.` + SUFIJO_CATEGORIA_VISION;
+}
+
+// ─────────────────────────────────────────────
+// PROMPT — Home Depot México
+// ─────────────────────────────────────────────
+
+function promptHomeDepot() {
+  return `Analiza este ticket de Home Depot México y extrae los datos en formato JSON.
+
+ESTRUCTURA DEL TICKET HOME DEPOT:
+- Encabezado: "THE HOME DEPOT MEXICO" con dirección de la tienda
+- RFC del emisor: HDM001017AS1
+- Número de tienda (4 dígitos, ej: 8752) y nombre (ej: "SANTA CATARINA")
+- Fecha/hora de compra
+- Tabla de productos con precios
+- Subtotal, IVA, Total
+- Código de barras al final
+- JUSTO DEBAJO del código de barras: una secuencia de 23 DÍGITOS (ESTE ES EL noTicket)
+
+CAMPOS A EXTRAER:
+{
+  "encontrado": true,
+  "comercio": "homedepot",
+  "noTicket": "secuencia COMPLETA de 23 dígitos impresa debajo del código de barras",
+  "tienda": "número de 4 dígitos de la tienda (ej: 8752) o null",
+  "fecha": "fecha de compra en formato YYYY-MM-DD",
+  "total": monto total como número decimal o null
+}
+
+REGLAS CRÍTICAS:
+
+1. noTicket: es UNA SOLA secuencia de EXACTAMENTE 23 dígitos (NO espacios, NO guiones, NO letras) impresa DEBAJO del código de barras en la parte inferior del ticket.
+   Ejemplo real: 00875200208187042026991 (23 dígitos)
+   Estructura interna: [00 prefijo][tienda 4d][secuencia/fecha/caja 17d]
+
+   - COPIA TODOS LOS DÍGITOS en orden, sin omitir ninguno
+   - NO uses el RFC del emisor (HDM001017AS1)
+   - NO uses el número de "FOLIO" ni "TRANSACCIÓN" ni "TARJ. BANCARIA"
+   - NO uses el número de "Autorización" ni "Afiliación"
+   - NO uses SKUs de producto
+   - El noTicket es específicamente la línea de 23 dígitos bajo el código de barras
+
+2. Si el usuario mandó el ticket como PDF/imagen del CORREO que envía Home Depot después de la compra, el mismo código de 23 dígitos aparece ahí también (suele ser más legible que una foto del ticket físico).
+
+3. NO confundir:
+   - El número 0 (cero) con la letra O
+   - El número 1 con la letra I o l
+
+4. fecha: usa formato YYYY-MM-DD. El año es ${new Date().getFullYear()} salvo que el ticket diga otra cosa.
+
+5. total: número con decimales, sin el símbolo "$". Del campo "TOTAL".
+
+6. Si algún campo no se ve claramente, usa null (EXCEPTO noTicket que es obligatorio).
+
+Responde SOLO con el JSON, sin texto adicional, sin markdown.`;
 }
 
 // ─────────────────────────────────────────────

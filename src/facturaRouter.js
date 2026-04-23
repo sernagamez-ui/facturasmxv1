@@ -12,6 +12,7 @@ const { facturarOxxoTienda }   = require('./portales/oxxoTienda');
 const { generarFacturaHEB }    = require('./portales/heb');
 const { facturarAlsea }        = require('./portales/alsea');
 const { facturar7Eleven }     = require('./portales/7eleven');
+const { facturarHomeDepot }   = require('./portales/homedepot');
 const { facturarOrigonCdc, ORIGON_CDC_CONFIG } = require('./portales/origonCdc');
 const { facturarMcDonalds } = require('./portales/mcdonalds');
 const { facturar: facturarOfficeDepot, buildUsuario: buildUsuarioOfficeDepot } = require('./portales/officedepot');
@@ -330,6 +331,16 @@ async function procesarFactura(ticketData, userData, phone, outputDirOverride) {
         if (!ticketData.total && r.total) ticketData.total = r.total;
       }
 
+    // ── Home Depot: HTTP puro, sin sesión ───────────────────────
+    } else if (comercio === 'homedepot') {
+      validar(ticketData, ['noTicket'], 'HomeDepot');
+
+      resultado = await facturarHomeDepot({
+        noTicket: ticketData.noTicket,
+        userData,
+        outputDir,
+      });
+
     // ── Grupo Galería (Origon CDC): Carl's Jr., IHOP, BWW, etc. ───────────
     } else if (ORIGON_CDC_BRANDS.has(comercio)) {
       const branchCode = ticketData.branchCode ?? ticketData.tienda;
@@ -486,6 +497,7 @@ function armarMensajeExito(resultado, ticketData, userData, comercio) {
     bww: ORIGON_CDC_CONFIG.bww?.label || 'Buffalo Wild Wings',
     mcdonalds: 'McDonald\'s',
     officedepot: 'Office Depot',
+    homedepot: 'Home Depot',
   };
   const nombre = nombres[comercio] || comercio;
 
@@ -543,6 +555,7 @@ function armarMensajeError(error, comercio) {
     bww: ORIGON_CDC_CONFIG.bww?.label || 'Buffalo Wild Wings',
     mcdonalds: 'McDonald\'s',
     officedepot: 'Office Depot',
+    homedepot: 'Home Depot',
   };
   const nombre = nombres[comercio] || comercio;
 
@@ -639,6 +652,7 @@ function comercioFacturableAutomatico(comercio) {
     'sieveEleven',
     'mcdonalds',
     'officedepot',
+    'homedepot',
   ].includes(comercio);
 }
 
@@ -658,6 +672,7 @@ function etiquetaComercio(comercio) {
     sieveEleven: '7-Eleven',
     mcdonalds: "McDonald's",
     officedepot: 'Office Depot',
+    homedepot: 'Home Depot',
   };
   return n[comercio] || comercio;
 }

@@ -51,7 +51,7 @@ async function handleTicket(ctx, fileId, userData) {
   if (!ticketData || !ticketData.comercio) {
     return {
       mensajeBot:
-        '❓ No reconocí el tipo de ticket. Por ahora proceso: Petro 7, OXXO Gas, Orsan, Pemex, 🏪 OXXO tienda, Office Depot, Alsea y HEB.',
+        '❓ No reconocí el tipo de ticket. Por ahora proceso: Petro 7, OXXO Gas, Orsan, Pemex, 🏪 OXXO tienda, Office Depot, Home Depot, Alsea y HEB.',
       ok: false,
     };
   }
@@ -295,6 +295,7 @@ function _nombreComercio(comercio) {
     cheesecake: 'The Cheesecake Factory', elporton: 'El Portón', heb: 'HEB',
     mcdonalds: "McDonald's", '7eleven': '7-Eleven',
     officedepot: 'Office Depot',
+    homedepot: 'Home Depot',
   };
   return nombres[comercio] || comercio;
 }
