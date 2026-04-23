@@ -620,144 +620,66 @@ async function hebClickMatOptionInDomByCode(page, c) {
 }
 
 /**
- * Régimen / USO CFDI: mat-autocomplete. Usa JSON de regimen_fiscal / uso_cfdi_sel si el panel no lista mat-option.
- * @param {import('playwright').Page} page
- * @param {import('playwright').Locator} inputLoc
- * @param {string} code
- * @param {string} fileTag nombre corto (regimen | uso_cfdi)
- * @param {Record<string, unknown>} cap capturado (regimenFiscalJson, usoCfdiJson)
+ * Régimen / USO CFDI: mat-autocomplete que muestra todas las opciones al abrir.
+ * Estrategia: focus + abrir panel + click en la opción que contenga el código.
+ * No escribir texto — el filtro del autocomplete a veces oculta todas las opciones.
  */
 async function hebSelectMatAutocomplete(page, inputLoc, code, fileTag, cap = {}) {
   const c = String(code).trim();
   if (!c) throw new Error(`HEB ${fileTag} vacío`);
-  const T = 25_000;
 
-  const textHint = hebCatalogTextHint(/** @type {Record<string, unknown>} */ (cap), fileTag, c);
-  if (textHint) {
-    const descOnly = hebLabelWithoutClave(textHint);
-    const threeWords = descOnly
-      .split(/\s+/)
-      .filter((w) => w.length > 2)
-      .slice(0, 3)
-      .join(' ');
-    const rawChunks = [
-      textHint,
-      descOnly,
-      textHint.slice(0, 80),
-      textHint.slice(0, 50),
-      textHint.split(/\s*-\s*/)[0]?.trim() || '',
-      threeWords,
-      c,
-    ];
-    const chunks = [];
-    const seen = new Set();
-    for (const x of rawChunks) {
-      if (x && !seen.has(x)) {
-        seen.add(x);
-        chunks.push(x);
-      }
-    }
-    for (const chunk of chunks) {
-      await hebMatInputType(page, inputLoc, chunk);
-      await inputLoc.press('ArrowDown').catch(() => {});
-      if (await hebClickMatOptionFuzzyInDom(page, c, textHint)) {
-        console.log(`[HEB] ${fileTag} OK (catálogo API + fuzzy DOM), filtro:`, chunk.slice(0, 60));
-        await page.waitForTimeout(200);
-        return;
-      }
-      if (await hebClickMatOptionInDomByCode(page, c)) {
-        console.log(`[HEB] ${fileTag} OK (catálogo API + click DOM), filtro:`, chunk.slice(0, 60));
-        await page.waitForTimeout(200);
-        return;
-      }
-      await inputLoc.press('Enter').catch(() => {});
-      if (await hebClickMatOptionFuzzyInDom(page, c, textHint)) {
-        await page.waitForTimeout(200);
-        return;
-      }
-      const re = new RegExp(`^\\s*${escapeRegExp(c)}\\b`);
-      const byRe = hebAutocompleteOptions(page).filter({ hasText: re });
-      try {
-        await byRe.first().waitFor({ state: 'visible', timeout: 6_000 });
-        await byRe.first().click();
-        await page.waitForTimeout(200);
-        return;
-      } catch {
-        // sigue
-      }
-      if (await hebClickOptionByCodeInPanel(page, inputLoc, c, fileTag, { openUnfiltered: false, fuzzyHint: textHint }))
-        return;
-    }
-    console.log(`[HEB] ${fileTag}: catálogo API no resolvió con relleno, flujo estándar…`);
-  }
+  // 1. Focus + abrir panel (sin escribir)
+  await inputLoc.click();
+  await inputLoc.fill(''); // por si venía texto basura
+  await page.waitForTimeout(200);
+  await inputLoc.press('ArrowDown'); // fuerza apertura del panel
+  await page.waitForTimeout(600);
 
-  await hebMatInputType(page, inputLoc, c);
-  await inputLoc.press('ArrowDown').catch(() => {});
+  // 2. Buscar la opción que contenga el código como palabra (ej. "612 - ..." o "G03 - ...")
+  const reWord = new RegExp(`\\b${escapeRegExp(c)}\\b`);
+  const opts = hebAutocompleteOptions(page).filter({ hasText: reWord });
 
-  const re = new RegExp(`^\\s*${escapeRegExp(c)}\\b`);
-  const byRe = hebAutocompleteOptions(page).filter({ hasText: re });
   try {
-    await byRe.first().waitFor({ state: 'visible', timeout: T });
-    await byRe.first().click();
-    await page.waitForTimeout(200);
+    await opts.first().waitFor({ state: 'visible', timeout: 10_000 });
+    await opts.first().click();
+    await page.waitForTimeout(250);
+    console.log(`[HEB] ${fileTag} OK (click directo): ${c}`);
     return;
   } catch {
-    console.log(`[HEB] ${fileTag}: sin fila "empieza con código", reintentos…`);
+    // no visible aún; intentar scroll dentro del panel o fuzzy match
   }
 
-  if (await hebClickOptionByCodeInPanel(page, inputLoc, c, fileTag, { openUnfiltered: false, fuzzyHint: textHint })) {
-    return;
-  }
-
-  console.log(`[HEB] ${fileTag}: abriendo panel sin filtrar (código a veces no está en el string filtrable)…`);
-  if (await hebClickOptionByCodeInPanel(page, inputLoc, c, fileTag, { openUnfiltered: true, fuzzyHint: textHint })) {
-    return;
-  }
-
-  await hebMatInputType(page, inputLoc, c);
-  await page.waitForTimeout(500);
-  if (await hebClickOptionByCodeInPanel(page, inputLoc, c, fileTag, { openUnfiltered: false, fuzzyHint: textHint })) {
-    return;
-  }
-
-  const t0 = Date.now();
-  while (Date.now() - t0 < 4_000) {
-    if (await hebClickOptionByCodeInPanel(page, inputLoc, c, fileTag, { openUnfiltered: true, fuzzyHint: textHint })) {
-      return;
-    }
-    await page.waitForTimeout(400);
-  }
-
+  // 3. Si no la encuentra, intentar match fuzzy por descripción del catálogo
+  const textHint = hebCatalogTextHint(/** @type {Record<string, unknown>} */ (cap), fileTag, c);
   if (textHint && (await hebClickMatOptionFuzzyInDom(page, c, textHint))) {
-    console.log(`[HEB] ${fileTag} OK (fuzzy DOM tras reintentos)`);
-    await page.waitForTimeout(200);
+    console.log(`[HEB] ${fileTag} OK (fuzzy DOM): ${c}`);
+    await page.waitForTimeout(250);
     return;
   }
 
-  if (await hebClickMatOptionInDomByCode(page, c)) {
-    console.log(`[HEB] ${fileTag} OK (último intento click DOM con código ${c})`);
-    await page.waitForTimeout(200);
-    return;
+  // 4. Último recurso: scroll al panel y reintento
+  const panel = page
+    .locator('.cdk-overlay-pane .mat-mdc-autocomplete-panel, .cdk-overlay-pane')
+    .first();
+  if (await panel.isVisible().catch(() => false)) {
+    for (let i = 0; i < 8; i++) {
+      await panel.evaluate((el) => el.scrollBy(0, 200)).catch(() => {});
+      await page.waitForTimeout(150);
+      const n = await opts.count();
+      for (let k = 0; k < n; k++) {
+        if (await opts.nth(k).isVisible().catch(() => false)) {
+          await opts.nth(k).click();
+          console.log(`[HEB] ${fileTag} OK (tras scroll): ${c}`);
+          await page.waitForTimeout(250);
+          return;
+        }
+      }
+    }
   }
 
   await hebFiscalDebugScreenshots(page, inputLoc, fileTag);
-  let apiHint = '';
-  try {
-    if (fileTag === 'regimen' && cap.regimenFiscalJson) {
-      const rows = hebRowsFromCatalogJson(cap.regimenFiscalJson);
-      apiHint = ` nFilasJson=${rows.length}`;
-    } else if (fileTag === 'uso_cfdi' && cap.usoCfdiJson) {
-      const rows = hebRowsFromCatalogJson(cap.usoCfdiJson);
-      apiHint = ` nFilasJson=${rows.length}`;
-    } else {
-      apiHint = ' (sin JSON de catálogo en memoria)';
-    }
-  } catch {
-    // noop
-  }
   throw new Error(
-    `HEB no pudo elegir ${fileTag}  ${c}  (mat-autocomplete).${apiHint} ` +
-      `Revisa: heb_fiscal_${fileTag}_full.png, _field.png, _panel.png en ${HEB_SCREENSHOT_DIR}`
+    `HEB no pudo elegir ${fileTag} ${c} (panel abierto pero opción no visible). Revisa heb_fiscal_${fileTag}_*.png`
   );
 }
 
