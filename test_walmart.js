@@ -1,88 +1,66 @@
 /**
- * test_walmart.js — Prueba local del adaptador Playwright (facturacion.walmartmexico.com.mx)
+ * test_walmart_adapter.js — runner standalone para src/portales/walmart.js
  *
- * Genera una solicitud REAL de factura por correo si no usas --dry-run.
- * Úsalo con un ticket vigente y datos fiscales correctos.
+ * Prueba el adaptador de producción sin pasar por Telegraf / facturaRouter.
+ * Si falla, tienes el stacktrace exacto; si pasa, el archivo está listo para
+ * integrarse al bot con una línea en facturaRouter.js.
  *
  * USO:
- *   node test_walmart.js <TC#> <TR#> [--dry-run] [--headful]
+ *   WALMART_HEADFUL=1 WALMART_TC=<20_digitos> WALMART_TR=<tr> node test_walmart_adapter.js
  *
- *   TC#  = dígitos del código bajo "TC#" (barra inferior del ticket)
- *   TR#  = dígitos de "TR#" / transacción
- *
- * Datos fiscales (por defecto los del test_homedepot; sobreescribe con env):
- *   WALMART_TEST_RFC, WALMART_TEST_CP, WALMART_TEST_REGIMEN, WALMART_TEST_EMAIL,
- *   WALMART_TEST_NOMBRE, WALMART_TEST_USO (ej. G03)
- *   WALMART_TIMEOUT_MS — milis por acción (default 120000). El portal usa ASP.NET AJAX lento.
- *
- * Ejemplos:
- *   node test_walmart.js 220426193021 01391 --dry-run
- *   node test_walmart.js 74332314121182720306 00986 --headful
- *   WALMART_USE_PROXY=1 node test_walmart.js ...
+ *   # Con override de usuario y tiempos largos para tickets lentos:
+ *   WALMART_HEADFUL=1 WALMART_POST_FISCAL_MS=300000 WALMART_SCREENSHOT_DIR=/tmp \
+ *     WALMART_TC=35355039334561586306 WALMART_TR=01391 \
+ *     node test_walmart_adapter.js 2>&1 | tee /tmp/walmart.log
  */
 
-/* eslint-disable no-console */
+'use strict';
 
 const { facturarWalmart } = require('./src/portales/walmart');
 
-const DEFAULT = {
-  rfc: String(process.env.WALMART_TEST_RFC || 'SEGC9001195V8').toUpperCase(),
-  nombre: String(process.env.WALMART_TEST_NOMBRE || 'CARLOS ALBERTO SERNA GAMEZ'),
-  cp: String(process.env.WALMART_TEST_CP || '66220').replace(/\D/g, '').slice(0, 5),
-  regimen: String(process.env.WALMART_TEST_REGIMEN || '612'),
-  correo: String(process.env.WALMART_TEST_EMAIL || 'sernagamez@gmail.com'),
-  usoCfdi: String(process.env.WALMART_TEST_USO || 'G03'),
+const TICKET = {
+  tc: process.env.WALMART_TC || process.argv[2] || '35355039334561586306',
+  tr: process.env.WALMART_TR || process.argv[3] || '01391',
 };
 
-function usage() {
-  console.log(`
-Uso: node test_walmart.js <TC#> <TR#> [--dry-run] [--headful]
+const USUARIO = {
+  rfc:          process.env.WALMART_RFC    || 'SEGC9001195V8',
+  nombre:       process.env.WALMART_NOMBRE || 'CARLOS ALBERTO SERNA GAMEZ',
+  cp:           process.env.WALMART_CP     || '66220',
+  correo:       process.env.WALMART_EMAIL  || 'sernagamez@gmail.com',
+  regimen:      process.env.WALMART_REGIMEN || '612',
+  usoCfdi:      process.env.WALMART_USO    || 'G03',
+};
 
-  --dry-run   Solo valida argumentos y datos; no abre el navegador
-  --headful   Misma variable que WALMART_HEADFUL=1 (ver el browser)
+(async () => {
+  console.log('╔══════════════════════════════════════════════════════════════╗');
+  console.log('║   TEST ADAPTER — src/portales/walmart.js                     ║');
+  console.log('╚══════════════════════════════════════════════════════════════╝');
+  console.log(`TC=${TICKET.tc} (${TICKET.tc.length} dígitos)  TR=${TICKET.tr}`);
+  console.log(`RFC=${USUARIO.rfc}  CP=${USUARIO.cp}  régimen=${USUARIO.regimen}`);
+  console.log();
 
-Requiere un ticket *no facturado* y ventana de tiempo válida en el portal.
-`);
-}
-
-async function main() {
-  const args = process.argv.slice(2).filter((a) => a !== '--');
-  const dry = args.includes('--dry-run');
-  if (args.includes('--headful')) process.env.WALMART_HEADFUL = '1';
-
-  const pos = args.filter((a) => !a.startsWith('--'));
-  if (pos.length < 2) {
-    usage();
-    process.exit(1);
+  const t0 = Date.now();
+  try {
+    const res = await facturarWalmart({
+      tc: TICKET.tc,
+      tr: TICKET.tr,
+      userData: USUARIO,
+    });
+    const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+    console.log();
+    console.log(`───── RESULTADO (${elapsed}s) ─────`);
+    console.log(JSON.stringify(res, null, 2));
+    if (res.ok) {
+      console.log('\n✅ ÉXITO — revisa tu correo por el XML/PDF');
+      process.exit(0);
+    } else {
+      console.log(`\n❌ FALLÓ — error=${res.error}`);
+      console.log(`   userMessage: ${res.userMessage}`);
+      process.exit(1);
+    }
+  } catch (e) {
+    console.error(`\n💥 EXCEPCIÓN sin catch en walmart.js:`, e);
+    process.exit(2);
   }
-
-  const [tc, tr] = pos;
-  const userData = {
-    rfc: DEFAULT.rfc,
-    nombre: DEFAULT.nombre,
-    codigoPostal: DEFAULT.cp,
-    regimen: DEFAULT.regimen,
-    correo: DEFAULT.correo,
-    usoCfdi: DEFAULT.usoCfdi,
-  };
-
-  console.log('[test_walmart] TC =', String(tc).replace(/\D/g, ''), 'TR =', String(tr).replace(/\D/g, ''));
-  console.log('[test_walmart] RFC =', userData.rfc, 'CP =', userData.codigoPostal, 'correo =', userData.correo);
-  if (dry) {
-    console.log('[test_walmart] --dry-run: no se invoca al portal.');
-    process.exit(0);
-  }
-
-  const r = await facturarWalmart({ tc, tr, userData });
-  if (r.ok) {
-    console.log('[test_walmart] OK:', r);
-    process.exit(0);
-  }
-  console.error('[test_walmart] FALLO:', r.error, r.userMessage);
-  process.exit(2);
-}
-
-main().catch((e) => {
-  console.error('[test_walmart] excepción:', e);
-  process.exit(3);
-});
+})();

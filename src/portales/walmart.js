@@ -328,7 +328,7 @@ async function asegurarPantallaFrmDatos(page, tag, T) {
  */
 async function esperarReportAdminTrasFiscal(page, maxMs, tag) {
   const reYaFacturado =
-    /ya\s+(se\s+encuentra\s+)?factur|facturad[oa]\s+previamente|previamente\s+factur|no\s+puede\s+emitir\s+.*\s+nuev|comprobante\s+fiscal\s+.*\s+(generad|emitid)|duplicad[oa].*factur|ya\s+existe\s+un\s+comprobante/i;
+    /ya\s+(se\s+encuentra\s+)?factur|facturad[oa]\s+previamente|previamente\s+factur|no\s+puede\s+emitir\s+.*\s+nuev|comprobante\s+fiscal\s+.*\s+(generad|emitid)|duplicad[oa].*factur|ya\s+existe\s+un\s+comprobante|no\s+es\s+posible\s+.*(factur|emit)|comprobante\s+duplic|factura\s+ya\s+gener|emisi[óo]n\s+no\s+dispon|no\s+procede\s+la\s+factur|ticket[\s\w,]{0,80}facturad|solicitud\s+.*\s+duplicad/i;
   const rePortalNeg =
     /no\s+se\s+encontr[oó]\s+el\s+(ticket|comprobante|registro)|ticket\s+no\s+v[aá]lid|no\s+v[aá]lido\s+para\s+factur|plazo\s+de\s+facturaci[oó]n\s+vencid|operaci[oó]n\s+no\s+v[aá]lid/i;
   const urlEsReportAdmin = (u) => (u || '').toLowerCase().includes('frmreportadmin');
@@ -542,8 +542,33 @@ async function facturarWalmart({ tc, tr, userData }) {
     ]);
     await cerrarPopupsWalmart(page, tag);
     console.log(`${tag} frmRFCEdita OK`);
+    await page.waitForLoadState('domcontentloaded').catch(() => {});
 
-    await page.locator('#ctl00_ContentPlaceHolder1_txtRFC').fill(rfc);
+    /* El RFC suele venir fijo/readonly (aspNetDisabled) desde frmDatos; fill() hace timeout en disabled. */
+    const rfcIn = page.locator('#ctl00_ContentPlaceHolder1_txtRFC');
+    await rfcIn.waitFor({ state: 'visible', timeout: T });
+    if (await rfcIn.isEditable().catch(() => false)) {
+      await rfcIn.fill(rfc);
+    } else {
+      const cur = ((await rfcIn.inputValue().catch(() => '')) || '').replace(/\s/g, '').toUpperCase();
+      const want = rfc.replace(/\s/g, '').toUpperCase();
+      if (!cur) {
+        return {
+          ok: false,
+          error: 'rfc',
+          userMessage: '⚠️ Walmart no mostró el RFC en el formulario de datos fiscales (campo de solo lectura vacío). Reintenta o verifica en frmDatos.',
+        };
+      }
+      if (cur !== want) {
+        return {
+          ok: false,
+          error: 'rfc',
+          userMessage: `⚠️ El RFC en el portal del ticket (${cur}) no coincide con el de tu perfil (${want}). Corrige el RFC en Cotas o refactura con el ticket correcto.`,
+        };
+      }
+      console.log(`${tag} RFC en portal fijo/readonly, coincide con perfil`);
+    }
+
     await page.locator('#ctl00_ContentPlaceHolder1_txtRazon').fill(nombre);
     await page.locator('#ctl00_ContentPlaceHolder1_txtCP').fill(cp);
     await page.locator('#ctl00_ContentPlaceHolder1_txtEmail').fill(email);
@@ -677,6 +702,21 @@ async function facturarWalmart({ tc, tr, userData }) {
       if (page) console.error(`${tag} error url=${page.url()} → ${msg.slice(0, 500)}`);
     } catch {
       /* */
+    }
+    /* "waitForTimeout" incluye "Timeout" pero a veces es porque se cerró Chrome (WALMART_HEADFUL=1). */
+    if (
+      /Target page, context or browser has been closed|Target closed|has been closed|Browser was not found/i.test(
+        msg
+      )
+    ) {
+      return {
+        ok: false,
+        error: 'navegador_cerrado',
+        userMessage:
+          '⚠️ Se **cerró la ventana de Chrome** mientras el flujo aún corria (o el browser se apagó). ' +
+            'Con `WALMART_HEADFUL=1` deja el navegador abierto hasta que el script termine, o interrumpe con Ctrl+C en la terminal. ' +
+            'Esto no es un timeout del portal de Walmart.',
+      };
     }
     try {
       fs.mkdirSync(SHOT, { recursive: true });
