@@ -213,67 +213,216 @@ function escapeRegExp(s) {
 }
 
 /**
- * Régimen / USO CFDI son mat-autocomplete: 8s en datacenter falla; el texto puede ser "601 - …" o "601- …".
+ * Varios PNG para Telegram/diagnóstico: página, campo y panel del autocomplete.
+ * @param {import('playwright').Page} page
+ * @param {import('playwright').Locator} inputLoc
+ * @param {string} fileTag
+ */
+async function hebFiscalDebugScreenshots(page, inputLoc, fileTag) {
+  const base = `heb_fiscal_${fileTag}`;
+  try {
+    await inputLoc.scrollIntoViewIfNeeded();
+  } catch {
+    // noop
+  }
+  try {
+    await page.screenshot({
+      path: hebScreenshotPath(`${base}_full.png`),
+      fullPage: true,
+      animations: 'disabled',
+    });
+  } catch (e) {
+    console.log('[HEB] screenshot full:', (e && e.message) || e);
+  }
+  try {
+    const field = page.locator('mat-form-field').filter({ has: inputLoc }).first();
+    if (await field.count() > 0) {
+      await field.screenshot({ path: hebScreenshotPath(`${base}_field.png`) });
+    } else {
+      await inputLoc.screenshot({ path: hebScreenshotPath(`${base}_field.png`) });
+    }
+  } catch (e) {
+    try {
+      await inputLoc.screenshot({ path: hebScreenshotPath(`${base}_field.png`) });
+    } catch {
+      // noop
+    }
+  }
+  try {
+    const panel = page
+      .locator('.cdk-overlay-container .mat-mdc-autocomplete-panel, .cdk-overlay-pane, .mdc-menu-surface')
+      .last();
+    if (await panel.isVisible().catch(() => false)) {
+      await panel.screenshot({ path: hebScreenshotPath(`${base}_panel.png`) });
+    }
+  } catch {
+    // noop
+  }
+  try {
+    const list = page.locator('.cdk-overlay-container mat-option, mat-option');
+    const m = await list.count();
+    const bits = [];
+    for (let i = 0; i < Math.min(m, 25); i++) {
+      if (!(await list.nth(i).isVisible().catch(() => false))) continue;
+      const t = ((await list.nth(i).textContent()) || '').replace(/\s+/g, ' ').trim();
+      if (t) bits.push(t.substring(0, 160));
+    }
+    console.log(`[HEB] mat-option (muestra, hasta 25 visibles/ítems): ` + JSON.stringify(bits));
+  } catch {
+    // noop
+  }
+}
+
+/**
+ * Todos los nodos de lista que suelen pintar HEB/Angular 15+ (mdc) en el overlay.
+ * @param {import('playwright').Page} page
+ */
+function hebAutocompleteOptions(page) {
+  return page.locator(
+    'cdk-overlay-container mat-option, cdk-overlay-container mat-mdc-option, mat-option, mat-mdc-option, [role=option]'
+  );
+}
+
+/**
+ * Escribe código en el input y, si al filtrar el panel se vacía, abre de nuevo (vacío + flechas) y busca por texto.
+ * @param {import('playwright').Page} page
+ * @param {import('playwright').Locator} inputLoc
+ * @param {string} c
+ * @param {string} fileTag
+ * @param {{ openUnfiltered: boolean }} opts
+ */
+async function hebClickOptionByCodeInPanel(page, inputLoc, c, fileTag, opts) {
+  const reWord = new RegExp(`\\b${escapeRegExp(c)}\\b`, 'i');
+  const reStart = new RegExp(`^\\s*${escapeRegExp(c)}\\b`, 'i');
+  const collectVisibleTexts = async () => {
+    const loc = hebAutocompleteOptions(page);
+    const n = await loc.count();
+    const rows = [];
+    for (let i = 0; i < n; i++) {
+      const el = loc.nth(i);
+      if (!(await el.isVisible().catch(() => false))) continue;
+      const raw = (await el.textContent()) || '';
+      const txt = raw.replace(/\s+/g, ' ').trim();
+      if (txt) rows.push({ el, txt });
+    }
+    return rows;
+  };
+
+  const tryClick = async (rows) => {
+    for (const { el, txt } of rows) {
+      const up = txt.toUpperCase();
+      if (
+        reStart.test(txt) ||
+        reWord.test(txt) ||
+        up.startsWith(c.toUpperCase() + ' ') ||
+        up.startsWith(c.toUpperCase() + ' -') ||
+        up.startsWith(c.toUpperCase() + ' –') ||
+        up.startsWith(c.toUpperCase() + '—') ||
+        up.startsWith(c.toUpperCase() + '-')
+      ) {
+        await el.click();
+        console.log(`[HEB] ${fileTag} OK:`, txt.slice(0, 120));
+        await page.waitForTimeout(200);
+        return true;
+      }
+    }
+    return false;
+  };
+
+  if (opts.openUnfiltered) {
+    await inputLoc.click();
+    await inputLoc.fill('');
+    await page.waitForTimeout(250);
+    for (let a = 0; a < 4; a += 1) {
+      await inputLoc.press('ArrowDown').catch(() => {});
+      await page.waitForTimeout(400);
+    }
+    await page.waitForTimeout(300);
+  }
+
+  let rows = await collectVisibleTexts();
+  if (rows.length === 0) {
+    const panel = page
+      .locator('.cdk-overlay-container .mdc-list, .mat-mdc-autocomplete-panel, .cdk-overlay-pane .mat-mdc-select-panel')
+      .first();
+    if (await panel.isVisible().catch(() => false)) {
+      await panel.evaluate((el) => {
+        el.scrollTop = 0;
+        el.scrollTo(0, 0);
+      });
+      for (let s = 0; s < 6; s += 1) {
+        await panel.evaluate((el) => {
+          el.scrollBy(0, 200);
+        });
+        await page.waitForTimeout(120);
+        rows = await collectVisibleTexts();
+        if (rows.length > 0) break;
+      }
+    }
+  }
+
+  if (await tryClick(rows)) return true;
+  return false;
+}
+
+/**
+ * Régimen / USO CFDI: mat-autocomplete. Si al escribir "601" el filtro no encuentra nada
+ * (sólo descripción visible), abrir el panel vacío (flechas) y buscar 601  ( 601  )  en el texto.
  * @param {import('playwright').Page} page
  * @param {import('playwright').Locator} inputLoc
  * @param {string} code
- * @param {string} fileTag nombre corto para screenshot (regimen | uso_cfdi)
+ * @param {string} fileTag nombre corto (regimen | uso_cfdi)
  */
 async function hebSelectMatAutocomplete(page, inputLoc, code, fileTag) {
   const c = String(code).trim();
   if (!c) throw new Error(`HEB ${fileTag} vacío`);
   const T = 25_000;
+
   await inputLoc.click();
   await inputLoc.fill('');
   await page.waitForTimeout(200);
   await inputLoc.fill(c);
-  await page.waitForTimeout(500);
+  await page.waitForTimeout(600);
   await inputLoc.press('ArrowDown').catch(() => {});
 
   const re = new RegExp(`^\\s*${escapeRegExp(c)}\\b`);
-  const byRe = page.locator('mat-option', { hasText: re });
+  const byRe = hebAutocompleteOptions(page).filter({ hasText: re });
   try {
     await byRe.first().waitFor({ state: 'visible', timeout: T });
     await byRe.first().click();
-    await page.waitForTimeout(250);
+    await page.waitForTimeout(200);
     return;
   } catch {
-    console.log(`[HEB] ${fileTag}: sin match rápido con regex, recorriendo mat-option…`);
+    console.log(`[HEB] ${fileTag}: sin fila "empieza con código", reintentos…`);
   }
 
-  const opts = page.locator('mat-option');
+  if (await hebClickOptionByCodeInPanel(page, inputLoc, c, fileTag, { openUnfiltered: false })) {
+    return;
+  }
+
+  console.log(`[HEB] ${fileTag}: abriendo panel sin filtrar (código a veces no está en el string filtrable)…`);
+  if (await hebClickOptionByCodeInPanel(page, inputLoc, c, fileTag, { openUnfiltered: true })) {
+    return;
+  }
+
+  await inputLoc.fill(c);
+  await page.waitForTimeout(500);
+  if (await hebClickOptionByCodeInPanel(page, inputLoc, c, fileTag, { openUnfiltered: false })) {
+    return;
+  }
+
   const t0 = Date.now();
-  while (Date.now() - t0 < 12_000) {
-    const n = await opts.count();
-    for (let i = 0; i < n; i++) {
-      const el = opts.nth(i);
-      if (!(await el.isVisible().catch(() => false))) continue;
-      const raw = (await el.textContent()) || '';
-      const txt = raw.replace(/\s+/g, ' ').trim();
-      if (!txt) continue;
-      const reStart = new RegExp(`^\\s*${escapeRegExp(c)}\\b`);
-      const cu = c.toUpperCase();
-      const tu = txt.toUpperCase();
-      if (
-        reStart.test(txt) ||
-        tu.startsWith(cu + ' ') ||
-        tu.startsWith(cu + ' -') ||
-        tu.startsWith(cu + ' –') ||
-        tu.startsWith(cu + '—') ||
-        tu.startsWith(cu + '-')
-      ) {
-        await el.click();
-        console.log(`[HEB] ${fileTag} OK (fallback):`, txt.slice(0, 100));
-        await page.waitForTimeout(250);
-        return;
-      }
+  while (Date.now() - t0 < 4_000) {
+    if (await hebClickOptionByCodeInPanel(page, inputLoc, c, fileTag, { openUnfiltered: true })) {
+      return;
     }
-    await page.waitForTimeout(350);
+    await page.waitForTimeout(400);
   }
 
-  await page.screenshot({ path: hebScreenshotPath(`heb_fiscal_${fileTag}.png`) });
+  await hebFiscalDebugScreenshots(page, inputLoc, fileTag);
   throw new Error(
-    `HEB no pudo elegir ${fileTag}  ${c}  (mat-autocomplete). Revisa heb_fiscal_${fileTag}.png`
+    `HEB no pudo elegir ${fileTag}  ${c}  (mat-autocomplete). ` +
+      `Revisa: heb_fiscal_${fileTag}_full.png, _field.png, _panel.png en ${HEB_SCREENSHOT_DIR}`
   );
 }
 
