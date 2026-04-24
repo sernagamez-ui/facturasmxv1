@@ -558,10 +558,9 @@ async function facturarWalmart({ tc, tr, userData }) {
       await cerrarPopupsWalmart(page, tag);
     }
 
-    await Promise.all([
-      page.waitForURL('**/frmRFCEdita**', { timeout: T }),
-      page.locator('#ctl00_ContentPlaceHolder1_btnAceptar').click(),
-    ]);
+    // Solo datos de ticket (TC/TR) hasta aquí. Un clic: frmDatos → frmRFCEdita. El Aceptar *fiscal* va más abajo.
+    await page.locator('#ctl00_ContentPlaceHolder1_btnAceptar').first().click();
+    await page.waitForURL('**/frmRFCEdita**', { timeout: T });
     await cerrarPopupsWalmart(page, tag);
     console.log(`${tag} frmRFCEdita OK`);
     await page.waitForLoadState('domcontentloaded').catch(() => {});
@@ -591,7 +590,33 @@ async function facturarWalmart({ tc, tr, userData }) {
         }
       }, regimen);
     }
-    await page.waitForTimeout(800);
+    // CRÍTICO: esperar autopostback del régimen fiscal antes de tocar uso CFDI
+    // (waitForAjaxPost traga el timeout; aquí hacemos waitForResponse para que el catch DIAG sea fiable)
+    console.log(`${tag} Esperando autopostback de régimen fiscal`);
+    try {
+      await page.waitForResponse(
+        (r) =>
+          r.url().includes('walmartmexico.com.mx') &&
+          r.request().method() === 'POST' &&
+          r.status() < 500 &&
+          r.url().toLowerCase().includes('frmrfcedita'),
+        { timeout: 15_000 }
+      );
+      await page.waitForTimeout(700);
+      console.log(`${tag} DIAG: autopostback régimen completado`);
+    } catch (e) {
+      console.log(
+        `${tag} DIAG: autopostback régimen NO detectado: ${String((e && e.message) || e).slice(0, 80)}`
+      );
+    }
+    await page.waitForTimeout(2500);
+    await cerrarPopupsWalmart(page, tag);
+
+    const usoOpts = await page.locator('select[id$="ddlusoCFDI"] option').count().catch(() => 0);
+    console.log(`${tag} DIAG: opciones uso CFDI cargadas=${usoOpts}`);
+    const regVal = await selReg.inputValue().catch(() => 'ERROR');
+    console.log(`${tag} DIAG: régimen actual valor=${regVal}`);
+
     const selUso = page.locator('select[id$="ddlusoCFDI"]');
     await selUso.waitFor({ state: 'visible', timeout: 8000 });
     await selUso.click();
@@ -617,22 +642,42 @@ async function facturarWalmart({ tc, tr, userData }) {
       }
     }
     await page.waitForTimeout(800);
-    // Esperar a que UpdatePanel procese el cambio de uso CFDI
+    const usoValActual = await selUso.inputValue().catch(() => 'ERROR');
+    console.log(`${tag} DIAG: uso CFDI seleccionado valor=${usoValActual}`);
+
     await page.waitForTimeout(1500);
     await cerrarPopupsWalmart(page, tag);
-    // Scroll al botón Aceptar por si quedó fuera del viewport
+
     const btnAceptarFiscal = page.locator('input#ctl00_ContentPlaceHolder1_btnAceptar').first();
     await btnAceptarFiscal.scrollIntoViewIfNeeded({ timeout: 5000 }).catch(() => {});
     await page.waitForTimeout(500);
+    console.log(`${tag} DIAG: clickeando btnAceptar fiscal`);
     await btnAceptarFiscal.click();
+    console.log(`${tag} DIAG: click ejecutado, esperando modal confirmación`);
+
+    // Modal "¿Están correctos todos sus datos?" — getByRole (codegen) suele ser más fiable que CSS
+    await page.waitForTimeout(2500);
+    try {
+      const btnContinuarModal = page.getByRole('button', { name: 'Continuar' });
+      await btnContinuarModal.waitFor({ state: 'visible', timeout: 8000 });
+      console.log(`${tag} DIAG: modal "¿Están correctos sus datos?" detectado → click Continuar`);
+      await btnContinuarModal.click();
+      await page.waitForTimeout(2000);
+    } catch (e) {
+      console.log(
+        `${tag} DIAG: modal Continuar no apareció: ${String((e && e.message) || e).slice(0, 80)}`
+      );
+    }
+
     await waitForAjaxPost(page, ['frmrfcedita', 'frmreportadmin', 'frmpaymenttype'], T);
-    // HAR: post-Aceptar suele ser navegación a frmPaymentType.aspx o directo a ReportAdmin
     try {
       await page.waitForURL(/frm(paymenttype|reportadmin)\.aspx/i, { timeout: Math.min(T, 90_000) });
     } catch {
       /* puede seguir en RFCEdita con aviso; esperarReportAdminTrasFiscal reintenta */
     }
     await page.waitForTimeout(1200);
+    const urlActual = page.url();
+    console.log(`${tag} DIAG: URL después de Aceptar=${urlActual}`);
 
     const tPost = postFiscalWaitMs();
     console.log(`${tag} panel envío: tiempo máx. post-fiscal ${(tPost / 1000).toFixed(0)}s (WALMART_POST_FISCAL_MS si está definida)`);

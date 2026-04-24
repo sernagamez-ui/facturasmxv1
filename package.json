@@ -10,6 +10,7 @@
     "smoke:mcdonalds": "node scripts/smoke-mcdonalds.js",
     "smoke:heb": "node scripts/smoke-heb.js",
     "smoke:heb:trace": "HEB_TRACE=1 HEB_DEBUG_API=1 node scripts/smoke-heb.js",
+    "smoke:soriana": "node scripts/smoke-soriana.js",
     "test:walmart": "node test_walmart.js"
   },
   "dependencies": {
