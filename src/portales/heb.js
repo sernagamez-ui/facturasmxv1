@@ -378,15 +378,19 @@ async function hebFiscalDebugScreenshots(page, inputLoc, fileTag) {
     // noop
   }
   try {
-    const list = page.locator('.cdk-overlay-container mat-option, mat-option');
+    const list = page.locator(
+      'cdk-overlay-container mat-mdc-option, cdk-overlay-container mat-option, cdk-overlay-container [role=option]'
+    );
     const m = await list.count();
     const bits = [];
     for (let i = 0; i < Math.min(m, 25); i++) {
-      if (!(await list.nth(i).isVisible().catch(() => false))) continue;
       const t = ((await list.nth(i).textContent()) || '').replace(/\s+/g, ' ').trim();
       if (t) bits.push(t.substring(0, 160));
     }
-    console.log(`[HEB] mat-option (muestra, hasta 25 visibles/ítems): ` + JSON.stringify(bits));
+    console.log(
+      `[HEB] mat-option/MDC en overlay (hasta 25, texto; puede no ser visible en Playwright): ` +
+        JSON.stringify(bits)
+    );
   } catch {
     // noop
   }
@@ -603,6 +607,139 @@ async function hebClickOptionByCodeInPanel(page, inputLoc, c, fileTag, opts) {
  * @param {import('playwright').Page} page
  * @param {string} c
  */
+/** Cuenta opciones en el overlay (MDC, legacy, role=option). */
+async function hebCountOverlayOptions(page) {
+  return page
+    .locator(
+      'cdk-overlay-container mat-mdc-option, cdk-overlay-container mat-option, cdk-overlay-container [role=option]'
+    )
+    .count();
+}
+
+/**
+ * HEB: en customer-tax-data el desplegable del mat-autocomplete abre al pulsar la "X" (sufijo / limpiar)
+ * en el mat-form-field (como en navegador manual), no solo con ArrowDown.
+ * @param {import('playwright').Locator} inputLoc
+ * @returns {Promise<boolean>} true si se hizo clic en un botón de sufijo
+ */
+async function hebClickMatSuffixClearForAutocomplete(inputLoc) {
+  const page = inputLoc.page();
+  const field = page.locator('mat-form-field').filter({ has: inputLoc }).first();
+  if ((await field.count()) === 0) return false;
+
+  const inSuffix = field.locator(
+    '.mat-mdc-text-field-suffix, .mat-mdc-form-field-suffix, mat-suffix'
+  );
+  const suffixButtons = inSuffix.locator('button');
+  const n = await suffixButtons.count();
+  for (let i = 0; i < n; i++) {
+    const b = suffixButtons.nth(i);
+    if (await b.isVisible().catch(() => false)) {
+      await b.click();
+      if (HEB_DEBUG_API) console.log(`[HEB] Clic en botón sufijo índice ${i} (X) del mat-autocomplete`);
+      return true;
+    }
+  }
+
+  for (let i = 0; i < n; i++) {
+    try {
+      await suffixButtons.nth(i).click({ force: true, timeout: 2_000 });
+      if (HEB_DEBUG_API) console.log(`[HEB] Clic forzado en botón sufijo índice ${i} (X)`);
+      return true;
+    } catch {
+      // sigue
+    }
+  }
+
+  // A veces el icon-button está en el form-field sin el wrapper .text-field-suffix
+  const iconBtns = field.locator('button.mat-mdc-icon-button, button[mat-icon-button]');
+  const ni = await iconBtns.count();
+  for (let i = 0; i < ni; i++) {
+    const b = iconBtns.nth(i);
+    if (await b.isVisible().catch(() => false)) {
+      await b.click();
+      if (HEB_DEBUG_API) console.log('[HEB] Clic en mat-icon-button del mat-form-field (autocomplete)');
+      return true;
+    }
+  }
+  for (let i = 0; i < ni; i++) {
+    try {
+      await iconBtns.nth(i).click({ force: true, timeout: 1_500 });
+      if (HEB_DEBUG_API) console.log('[HEB] Clic forzado en mat-icon-button del form-field');
+      return true;
+    } catch {
+      // sigue
+    }
+  }
+
+  const byRole = field.getByRole('button', { name: /clear|borrar|limpiar|close/i });
+  if ((await byRole.count()) > 0) {
+    const br = byRole.first();
+    if (await br.isVisible().catch(() => false)) {
+      await br.click();
+      if (HEB_DEBUG_API) console.log('[HEB] Clic en botón sufijo por getByRole (Clear/Borrar)');
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Abre el mat-autocomplete: primero el clic en X del HEB, luego vacío, ArrowDown y scroll en virtual list.
+ * @param {import('playwright').Page} page
+ * @param {import('playwright').Locator} inputLoc
+ */
+async function hebMatAutocompleteEnsureOpenWithOptions(page, inputLoc) {
+  const scrollPanels = page.locator(
+    'cdk-overlay-container cdk-virtual-scroll-viewport, cdk-overlay-container .mat-mdc-autocomplete-panel, cdk-overlay-container .mdc-list'
+  );
+
+  await inputLoc.scrollIntoViewIfNeeded();
+  await inputLoc.click();
+  await page.waitForTimeout(80);
+
+  // 1) Comportamiento comprobado en HEB: la "X" del sufijo abre / relanza el panel con toda la lista
+  if (await hebClickMatSuffixClearForAutocomplete(inputLoc)) {
+    await page.waitForTimeout(500);
+    if ((await hebCountOverlayOptions(page)) > 0) {
+      if (HEB_DEBUG_API) console.log('[HEB] Panel autocomplete abierto vía botón X');
+      return;
+    }
+    await hebClickMatSuffixClearForAutocomplete(inputLoc).catch(() => false);
+    await page.waitForTimeout(350);
+    if ((await hebCountOverlayOptions(page)) > 0) return;
+  }
+
+  await inputLoc.fill('');
+  await page.waitForTimeout(100);
+
+  for (let round = 0; round < 4; round++) {
+    for (let i = 0; i < 8; i++) {
+      await inputLoc.press('ArrowDown');
+      await page.waitForTimeout(40);
+      if ((await hebCountOverlayOptions(page)) > 0) return;
+    }
+    // Evitar Space: en algunos MDC elige la primera fila aunque no veamos aún nuestro código.
+    await inputLoc.click();
+    await page.waitForTimeout(150);
+  }
+
+  const nScroll = await scrollPanels.count();
+  for (let s = 0; s < nScroll; s++) {
+    for (let step = 0; step < 18; step++) {
+      await scrollPanels
+        .nth(s)
+        .evaluate((el) => {
+          el.scrollTop = (el.scrollTop || 0) + 400;
+        })
+        .catch(() => {});
+      await page.waitForTimeout(70);
+      if ((await hebCountOverlayOptions(page)) > 0) return;
+    }
+  }
+}
+
 async function hebClickMatOptionInDomByCode(page, c) {
   return page.evaluate((code) => {
     const esc = String(code).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -620,66 +757,68 @@ async function hebClickMatOptionInDomByCode(page, c) {
 }
 
 /**
- * Régimen / USO CFDI: mat-autocomplete que muestra todas las opciones al abrir.
- * Estrategia: focus + abrir panel + click en la opción que contenga el código.
- * No escribir texto — el filtro del autocomplete a veces oculta todas las opciones.
+ * Régimen / USO CFDI: mat-autocomplete. Sin filtrar con texto (puede esconder todo).
+ * Estrategia: abrir con varias teclas, virtual scroll, getByRole, click forzado, fuzzy y hebClickOptionByCodeInPanel.
  */
 async function hebSelectMatAutocomplete(page, inputLoc, code, fileTag, cap = {}) {
   const c = String(code).trim();
   if (!c) throw new Error(`HEB ${fileTag} vacío`);
 
-  // 1. Focus + abrir panel (sin escribir)
-  await inputLoc.click();
-  await inputLoc.fill(''); // por si venía texto basura
-  await page.waitForTimeout(200);
-  await inputLoc.press('ArrowDown'); // fuerza apertura del panel
-  await page.waitForTimeout(600);
+  const textHint = hebCatalogTextHint(/** @type {Record<string, unknown>} */ (cap), fileTag, c);
+  const reWord = new RegExp(`\\b${escapeRegExp(c)}\\b`, 'i');
 
-  // 2. Buscar la opción que contenga el código como palabra (ej. "612 - ..." o "G03 - ...")
-  const reWord = new RegExp(`\\b${escapeRegExp(c)}\\b`);
-  const opts = hebAutocompleteOptions(page).filter({ hasText: reWord });
+  await hebMatAutocompleteEnsureOpenWithOptions(page, inputLoc);
 
-  try {
-    await opts.first().waitFor({ state: 'visible', timeout: 10_000 });
-    await opts.first().click();
-    await page.waitForTimeout(250);
-    console.log(`[HEB] ${fileTag} OK (click directo): ${c}`);
-    return;
-  } catch {
-    // no visible aún; intentar scroll dentro del panel o fuzzy match
+  const inOverlay = page.locator('cdk-overlay-container');
+  const byRole = inOverlay.getByRole('option', { name: reWord });
+  if ((await byRole.count()) > 0) {
+    try {
+      await byRole.first().click({ timeout: 6_000 });
+      console.log(`[HEB] ${fileTag} OK (getByRole): ${c}`);
+      await page.waitForTimeout(250);
+      return;
+    } catch {
+      // sigue
+    }
   }
 
-  // 3. Si no la encuentra, intentar match fuzzy por descripción del catálogo
-  const textHint = hebCatalogTextHint(/** @type {Record<string, unknown>} */ (cap), fileTag, c);
+  const opts = hebAutocompleteOptions(page).filter({ hasText: reWord });
+  try {
+    await opts.first().waitFor({ state: 'attached', timeout: 4_000 });
+    await opts.first().click({ force: true, timeout: 4_000 });
+    console.log(`[HEB] ${fileTag} OK (click): ${c}`);
+    await page.waitForTimeout(250);
+    return;
+  } catch {
+    // sigue
+  }
+
   if (textHint && (await hebClickMatOptionFuzzyInDom(page, c, textHint))) {
     console.log(`[HEB] ${fileTag} OK (fuzzy DOM): ${c}`);
     await page.waitForTimeout(250);
     return;
   }
 
-  // 4. Último recurso: scroll al panel y reintento
-  const panel = page
-    .locator('.cdk-overlay-pane .mat-mdc-autocomplete-panel, .cdk-overlay-pane')
-    .first();
-  if (await panel.isVisible().catch(() => false)) {
-    for (let i = 0; i < 8; i++) {
-      await panel.evaluate((el) => el.scrollBy(0, 200)).catch(() => {});
-      await page.waitForTimeout(150);
-      const n = await opts.count();
-      for (let k = 0; k < n; k++) {
-        if (await opts.nth(k).isVisible().catch(() => false)) {
-          await opts.nth(k).click();
-          console.log(`[HEB] ${fileTag} OK (tras scroll): ${c}`);
-          await page.waitForTimeout(250);
-          return;
-        }
-      }
-    }
+  if (await hebClickOptionByCodeInPanel(page, inputLoc, c, fileTag, { openUnfiltered: true, fuzzyHint: textHint })) {
+    return;
   }
+
+  if (await hebClickMatOptionInDomByCode(page, c)) {
+    console.log(`[HEB] ${fileTag} OK (DOM byCode): ${c}`);
+    await page.waitForTimeout(250);
+    return;
+  }
+
+  const nOpt = await hebCountOverlayOptions(page);
+  const panelInfo = await page.evaluate(() => {
+    const p = document.querySelector('cdk-overlay-container .mat-mdc-autocomplete-panel');
+    if (!p) return 'sin_panel_mdc';
+    return `panel_h=${p.clientHeight} opt_nodes=${document.querySelectorAll('cdk-overlay-container mat-mdc-option, cdk-overlay-container mat-option, cdk-overlay-container [role=option]').length}`;
+  });
 
   await hebFiscalDebugScreenshots(page, inputLoc, fileTag);
   throw new Error(
-    `HEB no pudo elegir ${fileTag} ${c} (panel abierto pero opción no visible). Revisa heb_fiscal_${fileTag}_*.png`
+    `HEB no pudo elegir ${fileTag} ${c}. opciones_overlay≈${nOpt} ${panelInfo} Revisa heb_fiscal_${fileTag}_*.png en ${HEB_SCREENSHOT_DIR}`
   );
 }
 
