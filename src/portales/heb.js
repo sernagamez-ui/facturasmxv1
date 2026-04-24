@@ -634,6 +634,49 @@ async function hebCountOverlayOptions(page) {
 }
 
 /**
+ * El contenedor de CDK a veces solo aparece al primer overlay. Espera a que exista.
+ * @param {import('playwright').Page} page
+ * @param {number} timeout
+ */
+async function hebWaitCdkOverlayAttached(page, timeout = 5_000) {
+  try {
+    await page.waitForFunction(
+      () =>
+        document.querySelector(
+          'cdk-overlay-container, .cdk-overlay-container, [class*="cdk-overlay-container"]'
+        ) !== null,
+      { timeout }
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Keydown sintético (Angular escucha a veces only KeyboardEvent, no .press del driver).
+ * @param {import('playwright').Locator} inputLoc
+ */
+async function hebInputSyntheticKeydownArrowDown(inputLoc) {
+  await inputLoc.evaluate((el) => {
+    if (!(el instanceof HTMLInputElement)) return;
+    el.focus();
+    for (let i = 0; i < 5; i++) {
+      el.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'ArrowDown',
+          code: 'ArrowDown',
+          keyCode: 40,
+          which: 40,
+          bubbles: true,
+          cancelable: true,
+        })
+      );
+    }
+  });
+}
+
+/**
  * Clic en el botón de sufijo (X) recorriendo el DOM con closest(mat-form-field).
  * Más fiable en headless que filter({ has: inputLoc }).
  * @param {import('playwright').Locator} inputLoc
@@ -641,9 +684,28 @@ async function hebCountOverlayOptions(page) {
  */
 async function hebClickMatSuffixXFromInputDom(inputLoc) {
   const clicked = await inputLoc.evaluate((el) => {
-    if (!el || !(el instanceof HTMLInputElement)) return false;
-    const ff = el.closest('mat-form-field');
-    if (!ff) return false;
+    if (!el || !(el instanceof HTMLInputElement)) return 0;
+    // MDC: el control y el sufijo (X) comparten .mat-mdc-text-field
+    const mdt = el.closest('.mat-mdc-text-field');
+    if (mdt) {
+      const su = mdt.querySelector('.mat-mdc-text-field-suffix, mat-suffix, [class*="-text-field-suffix"]');
+      if (su) {
+        const b = su.querySelector('button, [mat-icon-button], [role="button"]');
+        if (b instanceof HTMLElement) {
+          b.click();
+          return 3;
+        }
+        const ico = su.querySelector('mat-icon, .mat-icon, svg');
+        if (ico instanceof HTMLElement) {
+          ico.parentElement?.click();
+          return 4;
+        }
+        (/** @type {HTMLElement} */ (su)).click();
+        return 5;
+      }
+    }
+    const ff = el.closest('mat-form-field, .mat-mdc-form-field, [class*="form-field__"]');
+    if (!ff) return 0;
     const sel =
       '.mat-mdc-text-field-suffix button, .mat-mdc-form-field-suffix button, ' +
       'mat-suffix button, [class*="text-field-suffix"] button, ' +
@@ -651,17 +713,27 @@ async function hebClickMatSuffixXFromInputDom(inputLoc) {
     const list = /** @type {NodeListOf<HTMLButtonElement>} */ (ff.querySelectorAll(sel));
     for (const btn of list) {
       btn.click();
-      return true;
+      return 1;
     }
     const any = /** @type {NodeListOf<HTMLButtonElement>} */ (ff.querySelectorAll('button'));
     if (any.length) {
       any[any.length - 1].click();
-      return true;
+      return 1;
     }
-    return false;
+    const sufs = /** @type {NodeListOf<HTMLElement>} */ (
+      ff.querySelectorAll('mat-suffix, .mat-mdc-text-field-suffix, .mat-mdc-form-field-suffix')
+    );
+    for (const s of sufs) {
+      const b = s.querySelector('button, [role="button"], mat-icon, .mat-icon');
+      if (b instanceof HTMLElement) {
+        b.click();
+        return 2;
+      }
+    }
+    return 0;
   });
   if (clicked && HEB_DEBUG_API) {
-    console.log('[HEB] Clic en X (sufijo) vía DOM en mat-form-field del input');
+    console.log('[HEB] Clic en X/sufijo vía DOM, modo:', clicked);
   }
   return !!clicked;
 }
@@ -748,19 +820,46 @@ async function hebMatAutocompleteEnsureOpenWithOptions(page, inputLoc) {
     'cdk-overlay-container cdk-virtual-scroll-viewport, cdk-overlay-container .mat-mdc-autocomplete-panel, cdk-overlay-container .mdc-list'
   );
 
+  for (let w = 0; w < 30; w++) {
+    if ((await inputLoc.getAttribute('disabled')) == null) break;
+    await page.waitForTimeout(150);
+  }
+
   await inputLoc.scrollIntoViewIfNeeded();
   await inputLoc.click();
-  await page.waitForTimeout(80);
+  await page.waitForTimeout(120);
 
-  // 1) Comportamiento comprobado en HEB: la "X" del sufijo abre / relanza el panel con toda la lista
+  // 1) HEB: "X" en sufijo MDC; contenedor cdk a veces se inserta al primer open
   if (await hebClickMatSuffixClearForAutocomplete(inputLoc)) {
-    await page.waitForTimeout(700);
+    await hebWaitCdkOverlayAttached(page, 6_000);
+    await page.waitForTimeout(400);
     if ((await hebCountOverlayOptions(page)) > 0) {
       if (HEB_DEBUG_API) console.log('[HEB] Panel autocomplete abierto vía botón X');
       return;
     }
     await hebClickMatSuffixClearForAutocomplete(inputLoc).catch(() => false);
-    await page.waitForTimeout(450);
+    await hebWaitCdkOverlayAttached(page, 3_000);
+    await page.waitForTimeout(400);
+    if ((await hebCountOverlayOptions(page)) > 0) return;
+  }
+
+  // 2) keydown real en el input (headless/Angular)
+  await hebInputSyntheticKeydownArrowDown(inputLoc);
+  await hebWaitCdkOverlayAttached(page, 3_000);
+  await page.waitForTimeout(200);
+  if ((await hebCountOverlayOptions(page)) > 0) return;
+  for (let i = 0; i < 6; i++) {
+    await inputLoc.press('ArrowDown');
+    await page.waitForTimeout(50);
+    if ((await hebCountOverlayOptions(page)) > 0) return;
+  }
+
+  // 3) doble click + otra X (algunos SPAs solo abren así)
+  await inputLoc.dblclick().catch(() => {});
+  await page.waitForTimeout(150);
+  if (await hebClickMatSuffixXFromInputDom(inputLoc)) {
+    await hebWaitCdkOverlayAttached(page, 4_000);
+    await page.waitForTimeout(500);
     if ((await hebCountOverlayOptions(page)) > 0) return;
   }
 
@@ -864,14 +963,18 @@ async function hebSelectMatAutocomplete(page, inputLoc, code, fileTag, cap = {})
 
   const nOpt = await hebCountOverlayOptions(page);
   const panelInfo = await page.evaluate(() => {
-    const root = document.querySelector('cdk-overlay-container');
-    if (!root) return 'sin_cdk_overlay';
+    const cdk = document.querySelector(
+      'cdk-overlay-container, .cdk-overlay-container, [class*="cdk-overlay-container"]'
+    );
+    if (!cdk) {
+      return 'cdk:no_montado(o overlay nunca abrió; contenedor lazy al primer panel)';
+    }
     const p =
       document.querySelector('cdk-overlay-container .mat-mdc-autocomplete-panel') ||
       document.querySelector('cdk-overlay-container .mat-autocomplete-panel') ||
       document.querySelector('cdk-overlay-container [role="listbox"]');
     if (!p) {
-      return `cdk_hijos=${root.children.length} sin_panel_ni_listbox`;
+      return `cdk_ok cdk_hijos=${cdk.children.length} sin_panel_ni_listbox`;
     }
     const o = document.querySelectorAll(
       'cdk-overlay-container mat-mdc-option, cdk-overlay-container mat-option, cdk-overlay-container [role=option]'
