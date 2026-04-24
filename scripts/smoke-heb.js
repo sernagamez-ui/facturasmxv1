@@ -12,6 +12,12 @@
  *    Navegador visible (defecto): ves el flujo en vivo.
  *    Sin UI: HEB_HEADFUL=0 npm run smoke:heb
  *
+ * 3) Evidencia para depurar (misma lógica que el bot, sin Telegram): trace Playwright
+ *    npm run smoke:heb:trace
+ *    Genera heb_trace_*.zip (DOM, red, capturas) en tmp/heb-debug o HEB_TRACE_DIR. Ver:
+ *    npx playwright show-trace ruta/al/heb_trace_*.zip
+ *    (Usa con HEB_TEST_*; opcional: HEB_DEBUG_API=1 ya va en el script.)
+ *
  * Capturas: tmp/heb-debug/heb_step0.png … step7.png (o HEB_SCREENSHOT_DIR)
  */
 
@@ -70,5 +76,9 @@ async function main() {
 main().catch((e) => {
   console.error(e.message || e);
   console.error('\nRevisa las capturas en:', process.env.HEB_SCREENSHOT_DIR);
+  if (process.env.HEB_TRACE === '1' || process.env.HEB_TRACE === 'true') {
+    const traceDir = process.env.HEB_TRACE_DIR || process.env.HEB_SCREENSHOT_DIR;
+    console.error('Busca heb_trace_*.zip en', traceDir, 'y: npx playwright show-trace <archivo>.zip');
+  }
   process.exit(1);
 });

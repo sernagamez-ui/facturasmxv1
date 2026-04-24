@@ -1007,6 +1007,16 @@ async function _generarFacturaHEB(ticketData, userData) {
       'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
   });
 
+  const hebTrace = process.env.HEB_TRACE === '1' || process.env.HEB_TRACE === 'true';
+  let hebTracePath = null;
+  if (hebTrace) {
+    const tdir = (process.env.HEB_TRACE_DIR && String(process.env.HEB_TRACE_DIR).trim()) || HEB_SCREENSHOT_DIR;
+    fs.mkdirSync(tdir, { recursive: true });
+    hebTracePath = path.join(tdir, `heb_trace_${Date.now()}.zip`);
+    await context.tracing.start({ screenshots: true, snapshots: true, sources: true });
+    console.log('[HEB] Trace activo (HEB_TRACE=1) → se escribirá en:', hebTracePath);
+  }
+
   let documentWait;
   try {
     fs.mkdirSync(HEB_SCREENSHOT_DIR, { recursive: true });
@@ -1308,6 +1318,16 @@ async function _generarFacturaHEB(ticketData, userData) {
       if (documentWait) documentWait.abort();
     } catch {
       // noop
+    }
+    if (hebTrace && hebTracePath) {
+      try {
+        await context.tracing.stop({ path: hebTracePath });
+        console.log(
+          '[HEB] Trace guardado. Abre con: npx playwright show-trace ' + JSON.stringify(hebTracePath)
+        );
+      } catch (e) {
+        console.warn('[HEB] trace stop:', (e && e.message) || e);
+      }
     }
     await browser.close();
   }

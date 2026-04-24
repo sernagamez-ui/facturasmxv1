@@ -9,6 +9,7 @@
     "smoke:oxxo": "node scripts/smoke-oxxo-portal.js",
     "smoke:mcdonalds": "node scripts/smoke-mcdonalds.js",
     "smoke:heb": "node scripts/smoke-heb.js",
+    "smoke:heb:trace": "HEB_TRACE=1 HEB_DEBUG_API=1 node scripts/smoke-heb.js",
     "test:walmart": "node test_walmart.js"
   },
   "dependencies": {
