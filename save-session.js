@@ -18,8 +18,10 @@ const PORTALS = {
     startUrl: 'https://www.soriana.com/iniciar-sesion?fromFacturacion=true',
     sessionFile: 'soriana-session.json',
     useOxxogasProxy: false,
+    /** Cloudflare bloquea a menudo el Chromium embebido; usamos Chrome/Edge del sistema. */
+    useSystemBrowserChannel: true,
     hint:
-      'Completa login (SMS/código) en Soriana. Cuando puedas abrir Facturación electrónica logueado, presiona Enter aquí.',
+      'Se abre Google Chrome de tu Mac (no "Chrome for Testing"). Completa el captcha y el login. Cuando Facturación electrónica funcione logueado, Enter aquí.',
     adminNote: 'POST /admin/session/soriana (soriana-session.json)',
   },
 };
@@ -50,10 +52,31 @@ const PORTALS = {
       );
     }
 
-    browser = await chromium.launch({
+    const launchBase = {
       headless: false,
       ...(proxy ? { proxy } : {}),
-    });
+    };
+
+    if (cfg.useSystemBrowserChannel) {
+      const channel =
+        process.env.SORIANA_SAVE_SESSION_CHANNEL || 'chrome';
+      const args = ['--disable-blink-features=AutomationControlled'];
+      try {
+        browser = await chromium.launch({
+          ...launchBase,
+          channel,
+          args,
+        });
+        console.log(`[save-session] Navegador: channel=${channel} (mejor para Cloudflare/Soriana)`);
+      } catch (e) {
+        console.warn(
+          `[save-session] No se pudo abrir channel=${channel} (${e.message}). ¿Tienes Chrome instalado? Probando Chromium embebido (Cloudflare puede fallar).`
+        );
+        browser = await chromium.launch({ ...launchBase, args });
+      }
+    } else {
+      browser = await chromium.launch(launchBase);
+    }
     const context = await browser.newContext();
     const page = await context.newPage();
 
