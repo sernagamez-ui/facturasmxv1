@@ -6,6 +6,9 @@ const { prepareOxxoGasPlaywrightProxy } = require('./src/proxyAgent');
 
 const portal = (process.argv[2] || 'oxxogas').toLowerCase();
 
+/** Misma URL que en src/portales/soriana.js — evita tener que abrir el enlace del pie a mano. */
+const SORIANA_FACTURA_URL = 'https://www.soriana.com/facturacionelectronica#FacturarCompra';
+
 const PORTALS = {
   oxxogas: {
     startUrl: 'https://facturacion.oxxogas.com',
@@ -15,13 +18,15 @@ const PORTALS = {
     adminNote: 'POST /admin/session (oxxogas-session.json)',
   },
   soriana: {
-    startUrl: 'https://www.soriana.com/iniciar-sesion?fromFacturacion=true',
+    startUrl: SORIANA_FACTURA_URL,
     sessionFile: 'soriana-session.json',
     useOxxogasProxy: false,
     /** Cloudflare bloquea a menudo el Chromium embebido; usamos Chrome/Edge del sistema. */
     useSystemBrowserChannel: true,
+    /** Tras Enter, navegamos a facturación por código (mismo criterio que el bot; no hace falta el enlace del pie). */
+    afterEnterGoto: SORIANA_FACTURA_URL,
     hint:
-      'Se abre Google Chrome de tu Mac (no "Chrome for Testing"). Completa el captcha y el login. Cuando Facturación electrónica funcione logueado, Enter aquí.',
+      'Chrome de tu Mac. 1) Pasa el captcha e inicia sesión (si pide ir a inicio, no importa). 2) Enter aquí: el script abre Facturación electrónica por ti y guarda la sesión.',
     adminNote: 'POST /admin/session/soriana (soriana-session.json)',
   },
 };
@@ -77,10 +82,13 @@ const PORTALS = {
     } else {
       browser = await chromium.launch(launchBase);
     }
-    const context = await browser.newContext();
+    const context =
+      portal === 'soriana'
+        ? await browser.newContext({ viewport: { width: 1360, height: 900 } })
+        : await browser.newContext();
     const page = await context.newPage();
 
-    await page.goto(cfg.startUrl);
+    await page.goto(cfg.startUrl, { waitUntil: 'domcontentloaded', timeout: 120_000 });
 
     console.log(`\n[save-session] Portal: ${portal}`);
     console.log(cfg.hint);
@@ -88,6 +96,16 @@ const PORTALS = {
     console.log(`(${cfg.adminNote})\n`);
 
     await new Promise(r => process.stdin.once('data', r));
+
+    if (cfg.afterEnterGoto) {
+      console.log('\n[save-session] Navegando a Facturación electrónica (igual que el bot)...');
+      try {
+        await page.goto(cfg.afterEnterGoto, { waitUntil: 'domcontentloaded', timeout: 120_000 });
+        await new Promise((r) => setTimeout(r, 2500));
+      } catch (e) {
+        console.warn('[save-session] Aviso al abrir facturación:', e.message, '(se guarda la sesión igual).');
+      }
+    }
 
     await context.storageState({ path: sessionFile });
     console.log('Sesión guardada en', sessionFile);
