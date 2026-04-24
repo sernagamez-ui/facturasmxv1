@@ -1,7 +1,8 @@
 /**
  * src/facturaQueue.js — Cola dual: Playwright (max 2) + HTTP (max 5)
  */
-const PLAYWRIGHT_PORTALES = new Set(['oxxogas']);
+/** Portales con navegador real; comparten tope de concurrencia bajo. */
+const PLAYWRIGHT_PORTALES = new Set(['oxxogas', 'soriana', 'walmart', 'heb']);
 
 class Pool {
   constructor(name, max) { this.name=name; this.max=max; this.running=0; this.queue=[]; this.total=0; this.errors=0; }

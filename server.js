@@ -345,8 +345,8 @@ bot.on('photo', async (ctx) => {
   if (!ticketData || !ticketData.comercio) {
     await bot.telegram.deleteMessage(chatId, msg.message_id).catch(() => {});
     return ctx.reply(
-      '❓ No reconocí el tipo de ticket. Por ahora proceso: gasolineras (Petro 7, OXXO Gas), ' +
-      '🏪 OXXO tienda, restaurantes Alsea y HEB.'
+      '❓ No reconocí el tipo de ticket. Prueba otra foto (más nítida). Proceso entre otros: gasolineras, OXXO, ' +
+      'Walmart, Soriana, HEB, Alsea, Home Depot, Office Depot.'
     );
   }
 
