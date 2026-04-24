@@ -397,6 +397,23 @@ async function hebFiscalDebugScreenshots(page, inputLoc, fileTag) {
 }
 
 /**
+ * Input de autocomplete (régimen / uso CFDI): localizar mat-form-field por etiqueta; si no, nth global.
+ * Evita `fi.nth(3)` desfasado por inputs extra o orden distinto en producción.
+ * @param {import('playwright').Page} page
+ * @param {import('playwright').Locator} fi
+ * @param {RegExp} labelRe
+ * @param {number} nthFallback
+ */
+function hebFiscalTaxAutocompleteInput(page, fi, labelRe, nthFallback) {
+  return page
+    .locator('mat-form-field')
+    .filter({ hasText: labelRe })
+    .locator('input')
+    .first()
+    .or(fi.nth(nthFallback));
+}
+
+/**
  * Todos los nodos de lista que suelen pintar HEB/Angular 15+ (mdc) en el overlay.
  * @param {import('playwright').Page} page
  */
@@ -617,12 +634,48 @@ async function hebCountOverlayOptions(page) {
 }
 
 /**
+ * Clic en el botón de sufijo (X) recorriendo el DOM con closest(mat-form-field).
+ * Más fiable en headless que filter({ has: inputLoc }).
+ * @param {import('playwright').Locator} inputLoc
+ * @returns {Promise<boolean>}
+ */
+async function hebClickMatSuffixXFromInputDom(inputLoc) {
+  const clicked = await inputLoc.evaluate((el) => {
+    if (!el || !(el instanceof HTMLInputElement)) return false;
+    const ff = el.closest('mat-form-field');
+    if (!ff) return false;
+    const sel =
+      '.mat-mdc-text-field-suffix button, .mat-mdc-form-field-suffix button, ' +
+      'mat-suffix button, [class*="text-field-suffix"] button, ' +
+      'button.mat-mdc-icon-button, button[mat-icon-button]';
+    const list = /** @type {NodeListOf<HTMLButtonElement>} */ (ff.querySelectorAll(sel));
+    for (const btn of list) {
+      btn.click();
+      return true;
+    }
+    const any = /** @type {NodeListOf<HTMLButtonElement>} */ (ff.querySelectorAll('button'));
+    if (any.length) {
+      any[any.length - 1].click();
+      return true;
+    }
+    return false;
+  });
+  if (clicked && HEB_DEBUG_API) {
+    console.log('[HEB] Clic en X (sufijo) vía DOM en mat-form-field del input');
+  }
+  return !!clicked;
+}
+
+/**
  * HEB: en customer-tax-data el desplegable del mat-autocomplete abre al pulsar la "X" (sufijo / limpiar)
  * en el mat-form-field (como en navegador manual), no solo con ArrowDown.
  * @param {import('playwright').Locator} inputLoc
  * @returns {Promise<boolean>} true si se hizo clic en un botón de sufijo
  */
 async function hebClickMatSuffixClearForAutocomplete(inputLoc) {
+  if (await hebClickMatSuffixXFromInputDom(inputLoc)) {
+    return true;
+  }
   const page = inputLoc.page();
   const field = page.locator('mat-form-field').filter({ has: inputLoc }).first();
   if ((await field.count()) === 0) return false;
@@ -701,13 +754,13 @@ async function hebMatAutocompleteEnsureOpenWithOptions(page, inputLoc) {
 
   // 1) Comportamiento comprobado en HEB: la "X" del sufijo abre / relanza el panel con toda la lista
   if (await hebClickMatSuffixClearForAutocomplete(inputLoc)) {
-    await page.waitForTimeout(500);
+    await page.waitForTimeout(700);
     if ((await hebCountOverlayOptions(page)) > 0) {
       if (HEB_DEBUG_API) console.log('[HEB] Panel autocomplete abierto vía botón X');
       return;
     }
     await hebClickMatSuffixClearForAutocomplete(inputLoc).catch(() => false);
-    await page.waitForTimeout(350);
+    await page.waitForTimeout(450);
     if ((await hebCountOverlayOptions(page)) > 0) return;
   }
 
@@ -811,9 +864,19 @@ async function hebSelectMatAutocomplete(page, inputLoc, code, fileTag, cap = {})
 
   const nOpt = await hebCountOverlayOptions(page);
   const panelInfo = await page.evaluate(() => {
-    const p = document.querySelector('cdk-overlay-container .mat-mdc-autocomplete-panel');
-    if (!p) return 'sin_panel_mdc';
-    return `panel_h=${p.clientHeight} opt_nodes=${document.querySelectorAll('cdk-overlay-container mat-mdc-option, cdk-overlay-container mat-option, cdk-overlay-container [role=option]').length}`;
+    const root = document.querySelector('cdk-overlay-container');
+    if (!root) return 'sin_cdk_overlay';
+    const p =
+      document.querySelector('cdk-overlay-container .mat-mdc-autocomplete-panel') ||
+      document.querySelector('cdk-overlay-container .mat-autocomplete-panel') ||
+      document.querySelector('cdk-overlay-container [role="listbox"]');
+    if (!p) {
+      return `cdk_hijos=${root.children.length} sin_panel_ni_listbox`;
+    }
+    const o = document.querySelectorAll(
+      'cdk-overlay-container mat-mdc-option, cdk-overlay-container mat-option, cdk-overlay-container [role=option]'
+    );
+    return `panel_h=${(/** @type {HTMLElement} */ (p).clientHeight)} opt_nodes=${o.length}`;
   });
 
   await hebFiscalDebugScreenshots(page, inputLoc, fileTag);
@@ -1025,13 +1088,25 @@ async function _generarFacturaHEB(ticketData, userData) {
     }
 
     // ── Régimen / USO CFDI — mat-autocomplete (catálogo API + DOM si no hay mat-option)
-    await hebSelectMatAutocomplete(page, fi.nth(3), String(regimenFiscal), 'regimen', captured);
+    const inputRegimen = hebFiscalTaxAutocompleteInput(
+      page,
+      fi,
+      /Régimen\s+fiscal|R[ée]gimen\s+fiscal|Regimen\s+fiscal|Régimen/i,
+      3
+    );
+    const inputUsoCfdi = hebFiscalTaxAutocompleteInput(
+      page,
+      fi,
+      /Uso de CFDI|Uso de cfdi|Uso de Cfdi|USO DE CFDI|Uso.*CFD/i,
+      5
+    );
+    await hebSelectMatAutocomplete(page, inputRegimen, String(regimenFiscal), 'regimen', captured);
     console.log('[HEB] Régimen:', regimenFiscal);
 
     await fi.nth(4).fill(email);
     console.log('[HEB] Email:', email);
 
-    await hebSelectMatAutocomplete(page, fi.nth(5), String(usoCfdi), 'uso_cfdi', captured);
+    await hebSelectMatAutocomplete(page, inputUsoCfdi, String(usoCfdi), 'uso_cfdi', captured);
     console.log('[HEB] Uso CFDI:', usoCfdi);
 
     await page.waitForTimeout(300);
