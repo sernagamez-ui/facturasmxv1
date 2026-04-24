@@ -11,7 +11,10 @@ const { Jimp }   = require('jimp');
 // ⚠️ Nombres de modelo verificados — no cambiar sin consultar docs.anthropic.com
 const MODEL        = 'claude-haiku-4-5-20251001';  // Default: rápido y barato
 const MODEL_SONNET = 'claude-sonnet-4-6';           // Alsea: sin QR, dígitos deben ser exactos
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const client = new Anthropic({
+  apiKey: process.env.ANTHROPIC_API_KEY,
+  defaultHeaders: { 'anthropic-beta': 'prompt-caching-2024-07-31' },
+});
 
 const { ORIGON_CDC_BRANDS } = require('./portales/origonCdc');
 const {
@@ -197,7 +200,8 @@ async function leerTicket(imageBuffer, mimeType = 'image/jpeg') {
     comercio === 'petro7' ||
     comercio === 'officedepot' ||
     comercio === 'homedepot' ||
-    comercio === 'walmart'
+    comercio === 'walmart' ||
+    comercio === 'soriana'
       ? MODEL_SONNET
       : MODEL;
 
@@ -207,8 +211,8 @@ async function leerTicket(imageBuffer, mimeType = 'image/jpeg') {
     messages: [{
       role: 'user',
       content: [
+        { type: 'text', text: prompt, cache_control: { type: 'ephemeral' } },
         { type: 'image', source: { type: 'base64', media_type: mimeType, data: base64 } },
-        { type: 'text', text: prompt },
       ],
     }],
   });
@@ -288,14 +292,15 @@ async function completarNoTicket7Eleven(ticketData, base64, mimeType) {
       messages: [{
         role: 'user',
         content: [
-          { type: 'image', source: { type: 'base64', media_type: mimeType, data: base64 } },
           {
             type: 'text',
             text:
               'Extrae el número largo que aparece debajo del código de barras del ticket 7-Eleven. ' +
               'Responde SOLO JSON con esta forma exacta: {"noTicket":"<solo_digitos>","candidatos":["<solo_digitos>"]}. ' +
               'Incluye hasta 3 candidatos ordenados por confianza. Cada candidato debe tener 30 a 40 dígitos, sin espacios ni guiones.',
+            cache_control: { type: 'ephemeral' },
           },
+          { type: 'image', source: { type: 'base64', media_type: mimeType, data: base64 } },
         ],
       }],
     });
@@ -715,7 +720,6 @@ async function detectarComercio(base64, mimeType) {
     messages: [{
       role: 'user',
       content: [
-        { type: 'image', source: { type: 'base64', media_type: mimeType, data: base64 } },
         {
           type: 'text',
           text: `Identifica el comercio de este ticket. Responde SOLO con UNA de estas palabras exactas (sin puntuación ni espacios extra):
@@ -743,6 +747,7 @@ mcdonalds
 officedepot
 homedepot
 walmart
+soriana
 general
 
 REGLAS:
@@ -770,8 +775,11 @@ REGLAS:
 - Si ves "OFFICE DEPOT", "OFFICEMAX", "Office Depot", "OfficeMax", "ODMX", facturacion.officedepot.com.mx -> responde: officedepot
 - Si ves "HOME DEPOT", "THE HOME DEPOT", "HDM001017AS1", "homedepot.com.mx" o el logo naranja cuadrado -> responde: homedepot
 - Si ves "WALMART", "WAL-MART", "WALMART SUPERCENTER", "Sam's Club", "SAMS CLUB", "Bodega Aurrera", "SUPERCENTER", RFC "NWM-970924" o facturación walmartmexico -> responde: walmart
+- Si ves "SORIANA", "Tiendas Soriana", "Soriana Híper", "Soriana Mercado", "soriana.com", RFC del grupo Soriana en el ticket -> responde: soriana
 - Cualquier otro comercio -> responde: general`,
+          cache_control: { type: 'ephemeral' },
         },
+        { type: 'image', source: { type: 'base64', media_type: mimeType, data: base64 } },
       ],
     }],
   });
@@ -785,6 +793,7 @@ REGLAS:
     'officedepot',
     'homedepot',
     'walmart',
+    'soriana',
     'general',
   ];
   return valid.includes(val) ? val : 'general';
@@ -804,6 +813,7 @@ function elegirPrompt(comercio) {
     case 'officedepot': return promptOfficeDepot();
     case 'homedepot':   return promptHomeDepot();
     case 'walmart':     return promptWalmart();
+    case 'soriana':     return promptSoriana();
     default:        return promptGeneral();
   }
 }
@@ -1214,6 +1224,28 @@ Responde SOLO con el JSON, sin texto adicional, sin markdown.`;
 // ─────────────────────────────────────────────
 // PROMPT — Walmart / Sam's / Aurrera (México, grupo Walmex)
 // ─────────────────────────────────────────────
+
+function promptSoriana() {
+  return `Analiza este ticket de Soriana (tienda o formato Soriana) y extrae los datos en formato JSON.
+
+El número de ticket para facturar en soriana.com suele ser una cadena larga de dígitos (a menudo 20 dígitos, a veces con ceros a la izquierda). Búscalo junto a leyendas como "TICKET", "TRANS", "FOLIO" o en el pie del ticket. Copia TODOS los dígitos en "noTicket" sin espacios.
+
+CAMPOS EN JSON:
+{
+  "encontrado": true,
+  "comercio": "soriana",
+  "noTicket": "solo dígitos del número de ticket/folio de facturación",
+  "fecha": "YYYY-MM-DD o null",
+  "total": número o null,
+  "categoria": "supermercado"
+}
+
+REGLAS:
+- "noTicket" = solo dígitos; no incluyas letras ni el código de barras como imagen.
+- "categoria" para Soriana es "supermercado".
+
+Responde SOLO con el JSON, sin markdown ni texto adicional.` + SUFIJO_CATEGORIA_VISION;
+}
 
 function promptWalmart() {
   return `Analiza este ticket de Walmart, Sam's Club o Bodega Aurrera (México) y extrae los datos en formato JSON.

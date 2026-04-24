@@ -14,6 +14,7 @@ const { facturarAlsea }        = require('./portales/alsea');
 const { facturar7Eleven }     = require('./portales/7eleven');
 const { facturarHomeDepot }   = require('./portales/homedepot');
 const { facturarWalmartFromTicket } = require('./portales/walmart');
+const { facturarSoriana } = require('./portales/soriana');
 const { facturarOrigonCdc, ORIGON_CDC_CONFIG } = require('./portales/origonCdc');
 const { facturarMcDonalds } = require('./portales/mcdonalds');
 const { facturar: facturarOfficeDepot, buildUsuario: buildUsuarioOfficeDepot } = require('./portales/officedepot');
@@ -27,6 +28,13 @@ let colaOxxoGas = Promise.resolve();
 function encolar(fn) {
   const res = colaOxxoGas.then(fn).catch(fn);
   colaOxxoGas = res.then(() => {}).catch(() => {});
+  return res;
+}
+
+let colaSoriana = Promise.resolve();
+function encolarSoriana(fn) {
+  const res = colaSoriana.then(fn).catch(fn);
+  colaSoriana = res.then(() => {}).catch(() => {});
   return res;
 }
 
@@ -352,6 +360,17 @@ async function procesarFactura(ticketData, userData, phone, outputDirOverride) {
         userData,
       });
 
+    // ── Soriana (e-commerce + facturación con cuenta) — Playwright + sesión guardada ──
+    } else if (comercio === 'soriana') {
+      validar(ticketData, ['noTicket'], 'Soriana');
+      resultado = await encolarSoriana(() =>
+        facturarSoriana({
+          noTicket: ticketData.noTicket,
+          userData,
+          outputDir,
+        })
+      );
+
     // ── Grupo Galería (Origon CDC): Carl's Jr., IHOP, BWW, etc. ───────────
     } else if (ORIGON_CDC_BRANDS.has(comercio)) {
       const branchCode = ticketData.branchCode ?? ticketData.tienda;
@@ -538,6 +557,7 @@ function armarMensajeExito(resultado, ticketData, userData, comercio) {
     officedepot: 'Office Depot',
     homedepot: 'Home Depot',
     walmart: 'Walmart',
+    soriana: 'Soriana',
   };
   const nombre = nombres[comercio] || comercio;
 
@@ -597,6 +617,7 @@ function armarMensajeError(error, comercio) {
     officedepot: 'Office Depot',
     homedepot: 'Home Depot',
     walmart: 'Walmart',
+    soriana: 'Soriana',
   };
   const nombre = nombres[comercio] || comercio;
 
@@ -695,6 +716,7 @@ function comercioFacturableAutomatico(comercio) {
     'officedepot',
     'homedepot',
     'walmart',
+    'soriana',
   ].includes(comercio);
 }
 
@@ -716,6 +738,7 @@ function etiquetaComercio(comercio) {
     officedepot: 'Office Depot',
     homedepot: 'Home Depot',
     walmart: 'Walmart',
+    soriana: 'Soriana',
   };
   return n[comercio] || comercio;
 }

@@ -138,6 +138,7 @@ function formatearNombreComercio(comercio) {
     homedepot: 'Home Depot',
     officemax: 'OfficeMax',
     walmart: 'Walmart',
+    soriana: 'Soriana',
     sodimac: 'Sodimac',
     liverpool: 'Liverpool',
     chedraui: 'Chedraui',

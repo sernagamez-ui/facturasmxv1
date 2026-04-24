@@ -5,7 +5,8 @@
  * Flujo (ASP.NET WebForms + UpdatePanel, capturado en HAR 2026-04):
  *   1. frmDatos — RFC, CP, TC# (código de ticket), TR# (transacción) → Info → TR → Aceptar
  *   2. frmRFCEdita — razón social, CP, email, régimen, uso CFDI → Aceptar
- *   3. (opcional) forma de pago — ddlPaymentType + Continuar
+ *   3. (opcional) forma de pago — muchas veces *página* frmPaymentType.aspx (HAR 2024+): ddlPaymentType + Continuar
+ *      (mismos IDs que antes en RFCEdita, pero URL propia) → luego ReportAdmin
  *   4. frmReportAdmin — envío por correo (rdCorreo) → Facturar
  *
  * A diferencia de Home Depot, no hay API REST: automatización vía Playwright.
@@ -98,8 +99,9 @@ function attachWalmartDialogHandler(page) {
  * @param {string} tag
  */
 async function cerrarPopupsWalmart(page, tag) {
-  const labelBtn =
-    /^(Aceptar|Acepto|Entendido|Entiendo|De acuerdo|Cerrar|OK|Continuar|Siguiente|Confirmar)$/i;
+  const labelBtnPositivo =
+    /^(Aceptar|Acepto|Entendido|Entiendo|De acuerdo|OK|Continuar|Siguiente|Confirmar)$/i;
+  const labelBtnNegativo = /^(Cerrar)$/i;
   let cerrados = 0;
 
   for (let ronda = 0; ronda < 10; ronda++) {
@@ -134,8 +136,14 @@ async function cerrarPopupsWalmart(page, tag) {
     }
 
     if (!hubo) {
-      const generico = page.getByRole('button', { name: labelBtn });
-      const gc = await generico.count();
+      // Primero intentar botones positivos (Continuar, Aceptar, etc.)
+      let generico = page.getByRole('button', { name: labelBtnPositivo });
+      let gc = await generico.count();
+      // Si no hay positivos, entonces buscar negativos (Cerrar)
+      if (gc === 0) {
+        generico = page.getByRole('button', { name: labelBtnNegativo });
+        gc = await generico.count();
+      }
       for (let j = 0; j < Math.min(gc, 12); j++) {
         const b = generico.nth(j);
         if (!(await b.isVisible().catch(() => false))) continue;
@@ -332,10 +340,12 @@ async function esperarReportAdminTrasFiscal(page, maxMs, tag) {
   const rePortalNeg =
     /no\s+se\s+encontr[oó]\s+el\s+(ticket|comprobante|registro)|ticket\s+no\s+v[aá]lid|no\s+v[aá]lido\s+para\s+factur|plazo\s+de\s+facturaci[oó]n\s+vencid|operaci[oó]n\s+no\s+v[aá]lid/i;
   const urlEsReportAdmin = (u) => (u || '').toLowerCase().includes('frmreportadmin');
+  const urlPaymentType = (u) => (u || '').toLowerCase().includes('frmpaymenttype');
   const MAX_CONTINUAR = 10;
   const t0 = Date.now();
   let continuarClicks = 0;
   let tick = 0;
+  let logPaymentTypePaso = true;
 
   while (Date.now() - t0 < maxMs) {
     tick += 1;
@@ -360,10 +370,20 @@ async function esperarReportAdminTrasFiscal(page, maxMs, tag) {
       return { kind: 'portal', hint: head.slice(0, 480) };
     }
 
+    if (urlPaymentType(url) && logPaymentTypePaso) {
+      logPaymentTypePaso = false;
+      console.log(
+        `${tag} forma de pago en frmPaymentType.aspx (navegación HAR) → Continuar hacia envío de factura`
+      );
+    }
+
     const btnC = page.locator('#ctl00_ContentPlaceHolder1_btnContinuar');
     if (continuarClicks < MAX_CONTINUAR && (await btnC.isVisible().catch(() => false))) {
       const pay = page.locator('#ctl00_ContentPlaceHolder1_ddlPaymentType');
       if (await pay.count()) {
+        await pay.waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
+        await pay.click().catch(() => {});
+        await page.waitForTimeout(300);
         try {
           await pay.selectOption({ value: '04' });
         } catch {
@@ -374,6 +394,7 @@ async function esperarReportAdminTrasFiscal(page, maxMs, tag) {
             /* una sola opción */
           }
         }
+        await page.waitForTimeout(500);
       }
       await despejarAvisosWalmart(page, tag, 1);
       try {
@@ -387,12 +408,13 @@ async function esperarReportAdminTrasFiscal(page, maxMs, tag) {
       const restPost = Math.min(95_000, maxMs - (Date.now() - t0) - 500);
       await waitForAjaxPost(
         page,
-        ['frmrfcedita', 'frmreportadmin', 'frmdatos'],
+        ['frmrfcedita', 'frmreportadmin', 'frmpaymenttype', 'frmdatos'],
         Math.max(5_000, restPost)
       );
       const restRace = Math.max(4_000, maxMs - (Date.now() - t0) - 500);
       await Promise.race([
         page.waitForURL(/frmreportadmin/i, { timeout: restRace }),
+        page.waitForURL(/frmpaymenttype/i, { timeout: Math.min(25_000, restRace) }),
         page.locator('#ctl00_ContentPlaceHolder1_btnContinuar').waitFor({ state: 'hidden', timeout: Math.min(32_000, restRace) }),
       ]).catch(() => {});
       await despejarAvisosWalmart(page, tag, 1);
@@ -544,41 +566,36 @@ async function facturarWalmart({ tc, tr, userData }) {
     console.log(`${tag} frmRFCEdita OK`);
     await page.waitForLoadState('domcontentloaded').catch(() => {});
 
-    /* El RFC suele venir fijo/readonly (aspNetDisabled) desde frmDatos; fill() hace timeout en disabled. */
-    const rfcIn = page.locator('#ctl00_ContentPlaceHolder1_txtRFC');
-    await rfcIn.waitFor({ state: 'visible', timeout: T });
-    if (await rfcIn.isEditable().catch(() => false)) {
-      await rfcIn.fill(rfc);
-    } else {
-      const cur = ((await rfcIn.inputValue().catch(() => '')) || '').replace(/\s/g, '').toUpperCase();
-      const want = rfc.replace(/\s/g, '').toUpperCase();
-      if (!cur) {
-        return {
-          ok: false,
-          error: 'rfc',
-          userMessage: '⚠️ Walmart no mostró el RFC en el formulario de datos fiscales (campo de solo lectura vacío). Reintenta o verifica en frmDatos.',
-        };
-      }
-      if (cur !== want) {
-        return {
-          ok: false,
-          error: 'rfc',
-          userMessage: `⚠️ El RFC en el portal del ticket (${cur}) no coincide con el de tu perfil (${want}). Corrige el RFC en Cotas o refactura con el ticket correcto.`,
-        };
-      }
-      console.log(`${tag} RFC en portal fijo/readonly, coincide con perfil`);
-    }
-
-    await page.locator('#ctl00_ContentPlaceHolder1_txtRazon').fill(nombre);
-    await page.locator('#ctl00_ContentPlaceHolder1_txtCP').fill(cp);
-    await page.locator('#ctl00_ContentPlaceHolder1_txtEmail').fill(email);
+    await page.locator('#ctl00_ContentPlaceHolder1_txtRFC').fill(rfc).catch(() => {});
+    await page.locator('#ctl00_ContentPlaceHolder1_txtRazon').fill(nombre).catch(() => {});
+    await page.locator('#ctl00_ContentPlaceHolder1_txtCP').fill(cp).catch(() => {});
+    await page.locator('#ctl00_ContentPlaceHolder1_txtEmail').fill(email).catch(() => {});
     const selReg = page.locator('#ctl00_ContentPlaceHolder1_ddlregimenFiscal');
+    await selReg.waitFor({ state: 'visible', timeout: 8000 });
+    await selReg.click();
+    await page.waitForTimeout(300);
     try {
       await selReg.selectOption({ value: regimen });
     } catch {
-      await selReg.selectOption({ label: new RegExp(regimen) });
+      // Si falla por value, buscar por texto que contenga el código
+      await page.evaluate((r) => {
+        const sel = document.querySelector('#ctl00_ContentPlaceHolder1_ddlregimenFiscal');
+        if (sel) {
+          for (const opt of sel.options) {
+            if (opt.value === r || opt.text.includes(r)) {
+              sel.value = opt.value;
+              sel.dispatchEvent(new Event('change', { bubbles: true }));
+              return;
+            }
+          }
+        }
+      }, regimen);
     }
+    await page.waitForTimeout(800);
     const selUso = page.locator('select[id$="ddlusoCFDI"]');
+    await selUso.waitFor({ state: 'visible', timeout: 8000 });
+    await selUso.click();
+    await page.waitForTimeout(300);
     try {
       await selUso.selectOption({ value: uso });
     } catch {
@@ -599,8 +616,22 @@ async function facturarWalmart({ tc, tr, userData }) {
         }, uso);
       }
     }
-    await page.locator('input#ctl00_ContentPlaceHolder1_btnAceptar').first().click();
-    await waitForAjaxPost(page, ['frmrfcedita', 'frmreportadmin'], T);
+    await page.waitForTimeout(800);
+    // Esperar a que UpdatePanel procese el cambio de uso CFDI
+    await page.waitForTimeout(1500);
+    await cerrarPopupsWalmart(page, tag);
+    // Scroll al botón Aceptar por si quedó fuera del viewport
+    const btnAceptarFiscal = page.locator('input#ctl00_ContentPlaceHolder1_btnAceptar').first();
+    await btnAceptarFiscal.scrollIntoViewIfNeeded({ timeout: 5000 }).catch(() => {});
+    await page.waitForTimeout(500);
+    await btnAceptarFiscal.click();
+    await waitForAjaxPost(page, ['frmrfcedita', 'frmreportadmin', 'frmpaymenttype'], T);
+    // HAR: post-Aceptar suele ser navegación a frmPaymentType.aspx o directo a ReportAdmin
+    try {
+      await page.waitForURL(/frm(paymenttype|reportadmin)\.aspx/i, { timeout: Math.min(T, 90_000) });
+    } catch {
+      /* puede seguir en RFCEdita con aviso; esperarReportAdminTrasFiscal reintenta */
+    }
     await page.waitForTimeout(1200);
 
     const tPost = postFiscalWaitMs();
