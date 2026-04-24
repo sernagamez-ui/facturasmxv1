@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { chromium } = require('playwright');
 const { resolveDataDir } = require('./src/dataDir');
-const { prepareOxxoGasPlaywrightProxy } = require('./src/proxyAgent');
+const { prepareOxxoGasPlaywrightProxy, prepareSorianaPlaywrightProxy } = require('./src/proxyAgent');
 
 const portal = (process.argv[2] || 'oxxogas').toLowerCase();
 
@@ -54,6 +54,14 @@ const PORTALS = {
       console.log(
         '[save-session] proxy:',
         proxy ? proxy.server : 'directo (sin OXXOGAS_USE_PLAYWRIGHT_PROXY=1)'
+      );
+    } else if (portal === 'soriana' && String(process.env.SORIANA_USE_PLAYWRIGHT_PROXY || '').trim() === '1') {
+      const prepared = await prepareSorianaPlaywrightProxy();
+      proxyTeardown = prepared.teardown;
+      proxy = prepared.proxy;
+      console.log(
+        '[save-session] proxy Soriana:',
+        proxy ? proxy.server : '(SORIANA_USE_PLAYWRIGHT_PROXY=1 pero sin URL — revisa SORIANA_PROXY_URL / PROXY_URL_SOCKS5 / PROXY_URL_STICKY)'
       );
     }
 

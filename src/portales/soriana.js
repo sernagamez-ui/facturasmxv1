@@ -6,6 +6,7 @@ const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
 const { resolveDataDir } = require('../dataDir');
+const { prepareSorianaPlaywrightProxy } = require('../proxyAgent');
 
 const BASE = 'https://www.soriana.com';
 const FACTURA_URL = `${BASE}/facturacionelectronica#FacturarCompra`;
@@ -35,6 +36,12 @@ function pickUsoCfdi(userData) {
   const u = userData.usoCfdi || userData.usoCFDI;
   if (u && String(u).trim()) return String(u).trim().toUpperCase();
   return getUsoCfdiDefault(userData.regimen);
+}
+
+/** Respuesta WAF/Akamai (no JSON del API), típica desde IP de datacenter. */
+function looksLikeSorianaWafBlock(snippet) {
+  const s = String(snippet || '');
+  return /blocked|GF\s*R\d+|akamai|access denied|forbidden/i.test(s);
 }
 
 /**
@@ -70,19 +77,49 @@ async function facturarSoriana({ noTicket, userData, outputDir }) {
   const usoCfdi = pickUsoCfdi(userData);
 
   let browser;
+  let proxyTeardown = async () => {};
   try {
+    const prepared = await prepareSorianaPlaywrightProxy();
+    proxyTeardown = prepared.teardown;
+    const { proxy } = prepared;
+    console.log('[Soriana] Playwright proxy:', proxy ? `on (${proxy.server})` : 'off (directo)');
+
     browser = await chromium.launch({
       headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-blink-features=AutomationControlled',
+      ],
+      ...(proxy ? { proxy } : {}),
     });
-    const context = await browser.newContext({ storageState: SESSION_FILE });
+    const context = await browser.newContext({
+      storageState: SESSION_FILE,
+      userAgent:
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      extraHTTPHeaders: { 'accept-language': 'es-MX,es;q=0.9' },
+    });
     const page = await context.newPage();
 
     console.log('[Soriana] Abriendo facturación electrónica...');
     await page.goto(FACTURA_URL, GOTO);
 
+    // Espera a que Cloudflare resuelva su challenge (hasta 20 s extra)
     const urlAfter = page.url();
-    if (/iniciar-sesion|facturacion-login/i.test(urlAfter)) {
+    if (/challenge|attention-required/i.test(await page.title())) {
+      console.log('[Soriana] Cloudflare challenge detectado, esperando resolución...');
+      try {
+        await page.waitForFunction(
+          () => !document.title.includes('Attention Required') && !document.title.includes('Just a moment'),
+          { timeout: 20_000 }
+        );
+      } catch (_) {
+        // Si no resuelve en 20 s, continúa igualmente; el error WAF se detectará después
+      }
+    }
+
+    if (/iniciar-sesion|facturacion-login/i.test(page.url())) {
       return {
         ok: false,
         error:
@@ -105,8 +142,27 @@ async function facturarSoriana({ noTicket, userData, outputDir }) {
     }, { dw: DW, ticket: ticketNorm });
 
     if (tipoJson.parseError) {
-      console.warn('[Soriana] Billing-TipoTicket parse:', tipoJson.snippet);
-      return { ok: false, error: 'Respuesta inválida al validar ticket (¿sesión caída?).' };
+      const sn = tipoJson.snippet || '';
+      console.warn('[Soriana] Billing-TipoTicket parse:', sn);
+      if (looksLikeSorianaWafBlock(sn)) {
+        return {
+          ok: false,
+          error: 'soriana_waf_ip',
+          userMessage:
+            '🚫 *Soriana bloqueó la petición desde esta red* (anti-bot; respuesta tipo “Blocked”).\n\n' +
+            'En Railway es habitual: la IP de salida no es la misma que en tu casa.\n\n' +
+            '*Qué hacer:*\n' +
+            '• En Railway: `SORIANA_USE_PLAYWRIGHT_PROXY=1` y un proxy *residencial en México* (`SORIANA_PROXY_URL` o `PROXY_URL_SOCKS5` / `PROXY_URL_STICKY`, ver `src/proxyAgent.js`).\n' +
+            '• Opcional: vuelve a generar `soriana-session.json` con el *mismo* proxy activo (`SORIANA_USE_PLAYWRIGHT_PROXY=1 node save-session.js soriana`) y súbelo con `POST /admin/session/soriana`.\n\n' +
+            `_Detalle técnico: ${String(sn).slice(0, 120)}_`,
+        };
+      }
+      return {
+        ok: false,
+        error: 'Respuesta inválida al validar ticket (¿sesión caída o bloqueo de red?).',
+        userMessage:
+          '⚠️ Soriana devolvió una respuesta inesperada al validar el ticket. Si no es sesión expirada, suele ser bloqueo por IP del servidor; prueba proxy MX (`SORIANA_USE_PLAYWRIGHT_PROXY=1`).',
+      };
     }
 
     const tr = tipoJson.result;
@@ -299,6 +355,7 @@ async function facturarSoriana({ noTicket, userData, outputDir }) {
     try {
       await browser.close();
     } catch (_) {}
+    await proxyTeardown();
   }
 }
 

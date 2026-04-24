@@ -638,6 +638,11 @@ function armarMensajeError(error, comercio) {
       `HEB no localizó ese ticket: el *número de folio/ticket*, la *fecha* y el *total* ` +
       `deben coincidir con el ticket *exactamente*  como en la caja. A veces la foto se lee mal. ` +
       `Comprueba en el impreso o prueba otra compra.`;
+  } else if (comercio === 'soriana' && String(error).includes('soriana_waf')) {
+    msg +=
+      `El portal respondió con *bloqueo anti-bot* (IP de datacenter). Configura proxy residencial MX: ` +
+      `\`SORIANA_USE_PLAYWRIGHT_PROXY=1\` y \`SORIANA_PROXY_URL\` o \`PROXY_URL_SOCKS5\` en Railway. ` +
+      `Vuelve a subir sesión si hace falta.`;
   } else {
     msg += `Error: ${error}\n\nIntenta de nuevo o escribe *ayuda*.`;
   }

@@ -180,6 +180,93 @@ function getPlaywrightProxyOxxoGas() {
 }
 
 /**
+ * Playwright para Soriana cuando SORIANA_USE_PLAYWRIGHT_PROXY=1.
+ * Orden: SORIANA_PROXY_URL → PROXY_URL_SOCKS5 → PROXY_URL_STICKY (getPlaywrightProxy).
+ * El portal suele devolver texto tipo "GF R01 BLocked!" desde IPs de hosting sin proxy MX.
+ * @returns {object|undefined}
+ */
+function getPlaywrightProxySoriana() {
+  if (String(process.env.SORIANA_USE_PLAYWRIGHT_PROXY || '').trim() !== '1') {
+    return undefined;
+  }
+
+  const tryUrl = (raw, label) => {
+    const s = raw != null ? String(raw).trim() : '';
+    if (!s) return null;
+    try {
+      const p = new URL(s);
+      if (p.protocol === 'socks5:' || p.protocol === 'socks4:') {
+        const port = p.port || '1080';
+        let password = p.password;
+        try {
+          password = decodeURIComponent(p.password);
+        } catch (_) {
+          password = p.password;
+        }
+        const o = { server: `socks5://${p.hostname}:${port}` };
+        if (p.username) {
+          o.username = p.username;
+          o.password = password || '';
+        }
+        return o;
+      }
+      const port = p.port || (p.protocol === 'https:' ? '443' : '80');
+      let password = p.password;
+      try {
+        password = decodeURIComponent(p.password);
+      } catch (_) {
+        password = p.password;
+      }
+      return {
+        server: `${p.protocol}//${p.hostname}:${port}`,
+        username: p.username || undefined,
+        password: password || undefined,
+      };
+    } catch (e) {
+      console.warn(`[proxyAgent] Soriana ${label} URL inválida:`, e.message);
+      return null;
+    }
+  };
+
+  let cfg = tryUrl(process.env.SORIANA_PROXY_URL, 'SORIANA_PROXY_URL');
+  if (cfg) return cfg;
+
+  cfg = tryUrl(process.env.PROXY_URL_SOCKS5, 'PROXY_URL_SOCKS5');
+  if (cfg) return cfg;
+
+  return getPlaywrightProxy();
+}
+
+/**
+ * Igual que prepareOxxoGasPlaywrightProxy pero para Soriana (SORIANA_USE_PLAYWRIGHT_PROXY).
+ * @returns {Promise<{ proxy: object|undefined, teardown: () => Promise<void> }>}
+ */
+async function prepareSorianaPlaywrightProxy() {
+  const p = getPlaywrightProxySoriana();
+  if (!p) {
+    return { proxy: undefined, teardown: async () => {} };
+  }
+
+  const hasAuth =
+    (p.username != null && String(p.username) !== '') ||
+    (p.password != null && String(p.password) !== '');
+  if (!hasAuth) {
+    return { proxy: p, teardown: async () => {} };
+  }
+
+  const upstream = playwrightShapeToUpstreamUrl(p);
+  const localUrl = await proxyChain.anonymizeProxy(upstream);
+  return {
+    proxy: { server: localUrl },
+    teardown: async () => {
+      try {
+        await proxyChain.closeAnonymizedProxy(localUrl, true);
+      } catch (_) {}
+    },
+  };
+}
+
+/**
  * Convierte { server, username, password } al URL upstream que entiende proxy-chain.
  */
 function playwrightShapeToUpstreamUrl(p) {
@@ -248,6 +335,8 @@ module.exports = {
   getPlaywrightProxy,
   getPlaywrightProxyOxxoTienda,
   getPlaywrightProxyOxxoGas,
+  getPlaywrightProxySoriana,
   prepareOxxoGasPlaywrightProxy,
+  prepareSorianaPlaywrightProxy,
   getSocksAgent,
 };
